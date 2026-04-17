@@ -90,3 +90,55 @@ graph TD
     class User,Tire,Size,Brand,Cat,Clustering,MLP plain;
 ```
 
+---
+
+## Getting Started
+
+### 1. Data Setup
+
+Place the raw JSONL dataset in the `data/raw/` folder and create the `data/processed/` folder for output:
+
+```bash
+mkdir -p data/raw data/processed
+```
+
+Then move or copy your dataset file into `data/raw/`:
+
+```
+data/
+├── raw/
+│   └── combined_tire_data_15k_cleaned.jsonl   # <-- put your dataset here
+└── processed/                                  # graph output will be saved here
+```
+
+### 2. Environment Setup
+
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
+
+```bash
+# Install dependencies and create the virtual environment
+uv sync
+
+# Activate the virtual environment
+source .venv/bin/activate
+```
+
+### 3. Build the Heterogeneous Graph
+
+```bash
+uv run python scripts/build_graph.py
+```
+
+This reads the JSONL data, constructs the PyG `HeteroData` graph, runs sanity checks, and saves the result to `data/processed/hetero_graph.pt`.
+
+### 4. Visualize the Graph
+
+```bash
+uv run python scripts/visualize_graph.py
+```
+
+Generates four figures in `outputs/figures/`:
+- `graph_schema.png` -- node and edge type overview
+- `subgraph_sample.png` -- sampled neighbourhood around a few users
+- `degree_distributions.png` -- edge degree histograms per node type
+- `tire_feature_distributions.png` -- distribution of each tire feature
