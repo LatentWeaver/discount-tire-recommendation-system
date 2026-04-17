@@ -38,57 +38,13 @@ $$ \text{Final Prediction} = \text{MLP}(\underbrace{h_{user} \oplus h_{tire}}_{\
   1. **Recommendation Score:** Predicts the user's expected rating or the probability of purchase for the specific tire.
   2. **Cluster Tagging:** Utilized for backend analytics and user profiling (e.g., building a user persona that strongly favors the "Budget" cluster).
 
-### 📊 System Flowchart
+### Model Architecture
 
-```mermaid
-graph TD
-    A[Heterogeneous Graph] -->|Preprocessing| B[HGT Network Encoder]
-    
-    subgraph Dual-Path
-        B -->|Path A| C[Deep Clustering, Intent Discovery]
-        B -->|Path B| D[Feature Transformation, Node Rep]
-        C --> E[Cluster Embedding C_tire]
-        D --> F[Node Embeddings H_user and H_tire]
-    end
-    
-    E --> G[Concatenate H and C_tire]
-    F --> G
-    
-    G --> H[Fusion and Prediction MLP]
-    H --> I[Prediction Results]
-```
-
+![Model Architecture](src/img/Model%20Architecture.png)
 ---
 
 ## Data Schema
-```mermaid
-graph TD
-    User((User))
-    Tire[Tire/Item]
-    Size(Size/Spec)
-    Brand(Brand/Manufacturer)
-    Cat(Category Tags)
-
-    User -- "reviews" --> Tire
-    Tire -- "has_spec" --> Size
-    Tire -- "produced_by" --> Brand
-    Tire -- "classified_as" --> Cat
-    
-    subgraph HGT_Feature_Extraction [HGT Feature Extraction]
-    Tire
-    Size
-    Brand
-    end
-
-    subgraph Downstream_Tasks [Downstream Tasks]
-    Tire --> Clustering[Deep Clustering]
-    Tire --> MLP[Recommendation MLP]
-    Clustering -.-> MLP
-    end
-
-    classDef plain fill:#ddd,stroke:#333,stroke-width:1px,color:#000;
-    class User,Tire,Size,Brand,Cat,Clustering,MLP plain;
-```
+![Data Schema](src/img/Data%20Schema.png)
 
 ---
 
@@ -113,13 +69,18 @@ data/
 
 ### 2. Environment Setup
 
-This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
+This project uses [uv](https://docs.astral.sh/uv/) for incredibly fast dependency management. All required packages are declared in `pyproject.toml`.
+
+To create a virtual environment and automatically install all packages specified in `pyproject.toml`, run:
 
 ```bash
-# Install dependencies and create the virtual environment
+# Create the virtual environment (.venv) and install dependencies
 uv sync
 
 # Activate the virtual environment
+# On Windows:
+.venv\Scripts\activate
+# On macOS/Linux:
 source .venv/bin/activate
 ```
 
