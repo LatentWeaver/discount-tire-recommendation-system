@@ -1,0 +1,16 @@
+[project]
+name = "discount-tire-recommendation-system"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "networkx>=3.6.1",
+    "numpy>=2.4.4",
+    "pandas>=3.0.2",
+    "pyyaml>=6.0.3",
+    "scikit-learn>=1.8.0",
+    "torch>=2.11.0",
+    "torch-geometric>=2.7.0",
+]

@@ -1,0 +1,7 @@
+data/processed/
+data/raw/
+.venv/
+__pycache__/
+.DS_Store
+.env
+uv.lock

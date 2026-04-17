@@ -1,4 +1,4 @@
-# Tire Recommendation & Complaint Pattern Analysis System
+# GNN-based Tire Recommendation System  
 
 An advanced, GNN-based tire recommendation engine that transcends traditional collaborative filtering by deploying **Heterogeneous Graph Neural Networks (HGT)**, **Deep Embedding Clustering**, and **Contrastive Learning**. It is specifically designed to decode complex user feedback, isolate hidden complaint patterns, and deliver highly contextual, complementary product recommendations.
 
