@@ -26,17 +26,51 @@ The **HGT Network** addresses the graph's heterogeneity by dynamically learning 
 
 ### Intermediate Layer: Dual-Path Processing
 This is the core architectural optimization of the system. The pipeline splits into two synchronized branches:
-- **Path A: Deep Clustering (Intent Discovery):** Feeds $h_{tire}$ into a clustering MLP to automatically categorize tires into distinct profiles, such as "Economy/High-Mileage," "Performance/Sport," or "Off-Road/All-Terrain."
-  - **Output:** Cluster probability distributions or definitive group labels ($C_{tire}$).
-- **Path B: Feature Transformation:** Applies non-linear transformations to the raw user and tire representations ($h_{user}$ and $h_{tire}$) to prepare them for dense vector matching.
 
-### Output Layer: Fusion & Prediction MLP
-This final layer acts as the confluence point, aggregating all information to generate the final recommendation.
+- **Path A: Deep Clustering (Intent Discovery).** Discovers latent tire profiles (e.g., "Economy/High-Mileage," "Performance/Sport," "Off-Road/All-Terrain") via an alternating DeepCluster procedure:
+    1. **Feature preprocessing.** Take $h_{tire}$ from the HGT encoder and apply **PCA → whitening → $\ell_2$-normalization** before clustering.
+    2. **k-means (every $N$ epochs).** Cluster the preprocessed embeddings with k-means to produce pseudo-labels $\hat{y}_{tire}$. $k$ is set to roughly $10\times$ the number of intended tire profiles (e.g., $k \approx 50$ for ~5 target categories).
+    3. **Classifier head (clustering MLP).** A small MLP head $g_W(h_{tire})$ is trained with cross-entropy against $\hat{y}_{tire}$. Gradients flow back through the HGT encoder, so the encoder learns embeddings that are naturally cluster-friendly.
+    4. **Trivial-solution safeguards.**
+        - **Empty-cluster reassignment.** If a cluster collapses during k-means, a non-empty centroid is copied with small Gaussian noise and the points are re-split.
+        - **Uniform sampling over pseudo-labels** (or equivalently, inverse-frequency loss weighting) to prevent all tires from collapsing into one dominant cluster.
+    - **Output (training):** soft cluster predictions $g_W(h_{tire})$ used for the auxiliary CE loss.
+    - **Output (inference):** the cluster probability distribution $C_{tire} = \mathrm{softmax}(g_W(h_{tire}))$, exposed to the Fusion MLP as an additional signal. The classifier head is **kept** at inference (rather than discarded) so the recommendation MLP gets an interpretable "intent" channel.
 
-$$ \text{Final Prediction} = \text{MLP}(\underbrace{h_{user} \oplus h_{tire}}_{\text{Individual Features}} \oplus \underbrace{C_{tire}}_{\text{Cluster Group Features}}) $$
-- **Results:** 
-  1. **Recommendation Score:** Predicts the user's expected rating or the probability of purchase for the specific tire.
-  2. **Cluster Tagging:** Utilized for backend analytics and user profiling (e.g., building a user persona that strongly favors the "Budget" cluster).
+- **Path B: Feature Transformation.** Applies non-linear transformations to $h_{user}$ and $h_{tire}$ to prepare them for dense vector matching.
+
+### Output Layer: Fusion & Ranking MLP
+This final layer is the confluence point, aggregating all information to produce a **ranking score** used for top-K recommendation.
+
+$$ s(u, t) = \text{MLP}(\underbrace{h_{user} \oplus h_{tire}}_{\text{Individual Features}} \oplus \underbrace{C_{tire}}_{\text{Cluster Group Features}}) $$
+
+The output is a raw scalar — higher means "more relevant for this user".
+#### Training Objective: BPR (Pairwise Ranking)
+Per training step, sample triplets $(u, t^+, t^-)$ where:
+- $t^+$ — a tire the user actually engaged with (review rating $\geq 4$).
+- $t^-$ — a randomly sampled tire the user has not reviewed (preferably matching the same `size` to avoid trivial negatives).
+
+Loss:
+
+$$ \mathcal{L}_{BPR} = -\frac{1}{|B|} \sum_{(u, t^+, t^-) \in B} \log \sigma\big(s(u, t^+) - s(u, t^-)\big) $$
+
+Combined with the auxiliary DeepCluster loss from Path A:
+
+$$ \mathcal{L}_{total} = \mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster} $$
+
+where $\lambda \in [0.1, 1.0]$ controls how strongly the clustering signal regularizes the encoder.
+
+#### Evaluation Metrics
+Top-K ranking metrics, **not** RMSE:
+- **Recall@K** — fraction of held-out positive tires recovered in the top-K predictions.
+- **NDCG@K** — rewards placing positives near the top of the ranked list.
+- **HitRate@K** — at least one relevant tire in top-K.
+
+Standard $K \in \{10, 20, 50\}$.
+
+#### Outputs
+1. **Ranking Score $s(u, t)$** — used to rank candidate tires per user; the top-K become the recommendation.
+2. **Cluster Tagging $C_{tire}$** — reused for backend analytics and user profiling (e.g., building a persona that strongly favors the "Budget" cluster).
 
 ### Model Architecture
 
