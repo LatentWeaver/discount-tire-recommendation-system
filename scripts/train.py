@@ -156,7 +156,8 @@ def main() -> None:
     for k, v in test_metrics.items():
         print(f"  {k:<14s} {v:.4f}")
 
-    save_path = (PROJECT_ROOT / args.save_path).resolve()
+    p = Path(args.save_path)
+    save_path = (PROJECT_ROOT / p.parent / f"{p.stem}_e{args.epochs}{p.suffix}").resolve()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), save_path)
     print(f"\nSaved final weights → {save_path}")
