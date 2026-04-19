@@ -23,7 +23,7 @@ from src.models import HGTEncoder
 
 def main() -> None:
     graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph.pt"
-    data = torch.load(graph_path, weights_only=False)
+    data = torch.load(graph_path, weights_only=False)["graph"]
 
     model = HGTEncoder.from_data(data, hidden_dim=128, num_layers=2, num_heads=4)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

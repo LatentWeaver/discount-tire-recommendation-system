@@ -176,3 +176,4 @@ uv run python tests/test_hgt_forward.py        # HGT encoder forward
 uv run python tests/test_intermediate_layer.py # Intermediate layer + DeepCluster refresh
 uv run python tests/test_train_step.py         # End-to-end: 1 refresh + 3 train steps + mini eval
 ```
+

@@ -26,7 +26,7 @@ from src.training.deep_cluster import refresh_pseudo_labels
 
 def main() -> None:
     graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph.pt"
-    data = torch.load(graph_path, weights_only=False)
+    data = torch.load(graph_path, weights_only=False)["graph"]
 
     hidden_dim = 128
     num_clusters = 50

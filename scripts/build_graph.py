@@ -68,7 +68,7 @@ def main(config_path: str = "configs/default.yaml") -> None:
 
     # ── Build graph ───────────────────────────────
     print("Building heterogeneous graph ...")
-    data = create_heterogeneous_graph(
+    data, mappings = create_heterogeneous_graph(
         df_reviews=df_reviews,
         df_tires=df_tires,
         df_brands=df_brands,
@@ -99,14 +99,24 @@ def main(config_path: str = "configs/default.yaml") -> None:
     print("   All checks passed!")
 
     # ── Save ──────────────────────────────────────
+    # Bundle graph + ID mappings + tire metadata so that downstream scripts
+    # (train, eval, visualize) can resolve human-readable names.
     out_path = processed_dir / graph_filename
-    torch.save(data, out_path)
-    print(f"\nGraph saved to {out_path}")
+    payload = {
+        "graph": data,
+        "mappings": mappings,       # {user_map, tire_map, brand_map, size_map}
+        "tire_df": df_tires,        # original tire DataFrame (has price, brand, size, etc.)
+    }
+    torch.save(payload, out_path)
+    print(f"\nGraph + mappings saved to {out_path}")
 
     # Quick reload test
     loaded = torch.load(out_path, weights_only=False)
-    assert loaded.node_types == data.node_types
+    assert loaded["graph"].node_types == data.node_types
+    assert "mappings" in loaded
+    assert "tire_df" in loaded
     print("   Reload verification passed!")
+    print(f"   Mappings: {', '.join(f'{k}: {len(v)} entries' for k, v in mappings.items())}")
     print("\nDone!")
 
 
@@ -117,3 +127,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(config_path=args.config)
+

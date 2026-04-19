@@ -80,7 +80,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph.pt"
-    data = torch.load(graph_path, weights_only=False)
+    data = torch.load(graph_path, weights_only=False)["graph"]
 
     device = pick_device(args.device)
     data = data.to(device)

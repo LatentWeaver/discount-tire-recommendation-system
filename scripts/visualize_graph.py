@@ -260,7 +260,8 @@ def plot_tire_features(data, save_path: Path) -> None:
 def main(graph_path: str = "data/processed/hetero_graph.pt") -> None:
     full_path = PROJECT_ROOT / graph_path
     print(f"Loading graph from {full_path} ...")
-    data = torch.load(full_path, weights_only=False)
+    loaded = torch.load(full_path, weights_only=False)
+    data = loaded["graph"] if isinstance(loaded, dict) else loaded
 
     output_dir = PROJECT_ROOT / "outputs" / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)

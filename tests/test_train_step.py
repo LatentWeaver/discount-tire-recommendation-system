@@ -30,7 +30,7 @@ def main() -> None:
     torch.manual_seed(0)
 
     graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph.pt"
-    data = torch.load(graph_path, weights_only=False)
+    data = torch.load(graph_path, weights_only=False)["graph"]
 
     model = TireRecommender.from_data(
         data,

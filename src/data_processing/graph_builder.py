@@ -32,7 +32,7 @@ def create_heterogeneous_graph(
     tire_features: np.ndarray,
     add_reverse_edges: bool = True,
     use_rating_as_edge_weight: bool = True,
-) -> HeteroData:
+) -> tuple[HeteroData, dict[str, dict[str, int]]]:
     """
     Construct a ``HeteroData`` graph from the preprocessed DataFrames.
 
@@ -48,7 +48,9 @@ def create_heterogeneous_graph(
 
     Returns
     -------
-    HeteroData
+    (HeteroData, mappings)
+        mappings is a dict with keys "user_map", "tire_map", "brand_map",
+        "size_map" — each mapping human-readable string → node index.
     """
     data = HeteroData()
 
@@ -128,7 +130,14 @@ def create_heterogeneous_graph(
     if add_reverse_edges:
         data["size", "spec_of", "tire"].edge_index = edge_index_size.flip(0)
 
-    return data
+    mappings = {
+        "user_map": user_map,
+        "tire_map": tire_map,
+        "brand_map": brand_map,
+        "size_map": size_map,
+    }
+
+    return data, mappings
 
 
 def display_graph_summary(data: HeteroData) -> None:
