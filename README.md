@@ -177,3 +177,34 @@ uv run python tests/test_intermediate_layer.py # Intermediate layer + DeepCluste
 uv run python tests/test_train_step.py         # End-to-end: 1 refresh + 3 train steps + mini eval
 ```
 
+### 6. Recommend (Inductive GNN Inference)
+
+```bash
+# Existing user (by index):
+uv run python scripts/inference.py --user 42 --k 10
+
+# New user with structured preferences (Inductive GNN):
+uv run python scripts/inference.py --user new \
+  --brand "Michelin,Continental" \
+  --size "235/40R18" \
+  --budget-min 100 --budget-max 250 \
+  --min-treadwear 400 \
+  --traction A --temperature A \
+  --k 10
+```
+
+For **new users**, the script uses Inductive GNN inference:
+1. Finds tires matching the preference filters (AND logic).
+2. Injects a temporary user node into the graph with preference edges to matching tires.
+3. Runs the full HGT → Intermediate → FusionMLP pipeline on the augmented graph.
+4. Returns top-K scored tires with names and cluster IDs.
+
+| Filter | Flag | Example |
+|--------|------|---------|
+| Brand | `--brand` | `"Michelin,Continental"` |
+| Size | `--size` | `"235/40R18"` |
+| Budget | `--budget-min/max` | `100`, `250` |
+| Treadwear | `--min-treadwear` | `400` |
+| Traction | `--traction` | `A` (grades: AA > A > B > C) |
+| Temperature | `--temperature` | `A` (grades: A > B > C) |
+
