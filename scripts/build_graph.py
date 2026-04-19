@@ -36,6 +36,15 @@ def main(config_path: str = "configs/default.yaml") -> None:
         cfg = yaml.safe_load(f)
 
     raw_path = PROJECT_ROOT / cfg["data"]["raw_path"]
+    if not raw_path.exists():
+        fallback = PROJECT_ROOT / Path(cfg["data"]["raw_path"]).name
+        if fallback.exists():
+            print(f"Configured raw file not found, using fallback: {fallback}")
+            raw_path = fallback
+        else:
+            raise FileNotFoundError(
+                f"Raw dataset not found at {raw_path} or {fallback}"
+            )
     processed_dir = PROJECT_ROOT / cfg["data"]["processed_dir"]
     graph_filename = cfg["data"]["graph_filename"]
     processed_dir.mkdir(parents=True, exist_ok=True)
@@ -127,4 +136,3 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(config_path=args.config)
-

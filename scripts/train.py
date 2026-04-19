@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--refresh-every", type=int, default=2,
                    help="Re-run k-means every N epochs.")
     p.add_argument("--rating-threshold", type=float, default=4.0)
+    p.add_argument("--val-ratio", type=float, default=0.1,
+                   help="Fraction of review edges reserved for validation.")
+    p.add_argument("--test-ratio", type=float, default=0.1,
+                   help="Fraction of review edges reserved for test.")
+    p.add_argument("--train-on-full-dataset", action="store_true",
+                   help="Use all review edges for training and skip val/test evaluation.")
     p.add_argument("--eval-every", type=int, default=5)
     p.add_argument("--save-path", type=str,
                    default="outputs/checkpoints/recommender.pt",
@@ -93,8 +99,14 @@ def main() -> None:
         num_clusters=args.num_clusters,
     ).to(device)
 
+    val_ratio = 0.0 if args.train_on_full_dataset else args.val_ratio
+    test_ratio = 0.0 if args.train_on_full_dataset else args.test_ratio
     sampler = BPRSampler(
-        data, rating_threshold=args.rating_threshold, seed=args.seed
+        data,
+        rating_threshold=args.rating_threshold,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=args.seed,
     )
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -120,6 +132,8 @@ def main() -> None:
         f"Val: {sampler.val_users.size(0):,} | "
         f"Test: {sampler.test_users.size(0):,}"
     )
+    if args.train_on_full_dataset:
+        print("Training on the full dataset: validation and test evaluation are disabled.")
 
     for epoch in range(1, args.epochs + 1):
         if (epoch - 1) % args.refresh_every == 0:
@@ -142,7 +156,11 @@ def main() -> None:
             f"contrast={agg['L_contrast']:.4f}"
         )
 
-        if epoch % args.eval_every == 0 or epoch == args.epochs:
+        should_eval = (
+            sampler.val_users.numel() > 0
+            and (epoch % args.eval_every == 0 or epoch == args.epochs)
+        )
+        if should_eval:
             metrics = trainer.evaluate(split="val", ks=(10, 20, 50))
             metric_str = " | ".join(
                 f"{k}={v:.4f}" for k, v in metrics.items() if k.startswith("Recall")
@@ -151,10 +169,13 @@ def main() -> None:
 
         print(msg)
 
-    print("\nFinal test metrics:")
-    test_metrics = trainer.evaluate(split="test", ks=(10, 20, 50))
-    for k, v in test_metrics.items():
-        print(f"  {k:<14s} {v:.4f}")
+    if sampler.test_users.numel() > 0:
+        print("\nFinal test metrics:")
+        test_metrics = trainer.evaluate(split="test", ks=(10, 20, 50))
+        for k, v in test_metrics.items():
+            print(f"  {k:<14s} {v:.4f}")
+    else:
+        print("\nNo held-out test split: final evaluation skipped.")
 
     p = Path(args.save_path)
     save_path = (PROJECT_ROOT / p.parent / f"{p.stem}_e{args.epochs}{p.suffix}").resolve()

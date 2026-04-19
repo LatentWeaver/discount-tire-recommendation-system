@@ -31,6 +31,11 @@ class BPRSampler:
         test_ratio: float = 0.1,
         seed: int = 0,
     ) -> None:
+        if val_ratio < 0 or test_ratio < 0:
+            raise ValueError("val_ratio and test_ratio must be non-negative.")
+        if val_ratio + test_ratio >= 1.0:
+            raise ValueError("val_ratio + test_ratio must be < 1.0.")
+
         edge_index = data["user", "reviews", "tire"].edge_index
         all_users = edge_index[0]
         all_tires = edge_index[1]
@@ -43,46 +48,12 @@ class BPRSampler:
             )
 
         ratings = edge_attr.squeeze(-1)
-        good_mask = ratings >= rating_threshold
-        bad_mask = ~good_mask
-
-        users = all_users[good_mask]
-        tires = all_tires[good_mask]
-        bad_users = all_users[bad_mask]
-        bad_tires = all_tires[bad_mask]
 
         self.num_users = data["user"].num_nodes
         self.num_tires = data["tire"].num_nodes
 
-        # Per-user positives — reject false negatives in BPR sampling
-        # AND act as held-out ground truth for top-K eval.
-        self.user_positives: list[set[int]] = [set() for _ in range(self.num_users)]
-        for u, t in zip(users.tolist(), tires.tolist()):
-            self.user_positives[u].add(t)
-
-        # Per-user disliked tires — used for contrastive sampling.
-        self.user_disliked: list[list[int]] = [[] for _ in range(self.num_users)]
-        for u, t in zip(bad_users.tolist(), bad_tires.tolist()):
-            self.user_disliked[u].append(t)
-
-        # Per-user positives as a list (for fast random.choice during contrast).
-        self.user_positives_list: list[list[int]] = [
-            list(s) for s in self.user_positives
-        ]
-
-        # Pool of users who have BOTH ≥1 good and ≥1 bad review — only
-        # these can produce a contrastive triplet.
-        self.contrast_users: torch.Tensor = torch.tensor(
-            [
-                u
-                for u in range(self.num_users)
-                if self.user_positives_list[u] and self.user_disliked[u]
-            ],
-            dtype=torch.long,
-        )
-
-        # Random train / val / test split on the (u, t) good-edge list.
-        n = users.size(0)
+        # Random train / val / test split on the full review edge list.
+        n = all_users.size(0)
         g = torch.Generator().manual_seed(seed)
         perm = torch.randperm(n, generator=g)
         n_test = int(n * test_ratio)
@@ -91,12 +62,52 @@ class BPRSampler:
         val_idx = perm[n_test : n_test + n_val]
         train_idx = perm[n_test + n_val :]
 
-        self.train_users = users[train_idx]
-        self.train_tires = tires[train_idx]
-        self.val_users = users[val_idx]
-        self.val_tires = tires[val_idx]
-        self.test_users = users[test_idx]
-        self.test_tires = tires[test_idx]
+        train_good = ratings[train_idx] >= rating_threshold
+        val_good = ratings[val_idx] >= rating_threshold
+        test_good = ratings[test_idx] >= rating_threshold
+        train_bad = ~train_good
+
+        self.train_users = all_users[train_idx][train_good]
+        self.train_tires = all_tires[train_idx][train_good]
+        self.val_users = all_users[val_idx][val_good]
+        self.val_tires = all_tires[val_idx][val_good]
+        self.test_users = all_users[test_idx][test_good]
+        self.test_tires = all_tires[test_idx][test_good]
+
+        # Per-user reviewed tires from the TRAIN split only. This keeps
+        # held-out interactions out of the training sampler.
+        self.user_reviewed: list[set[int]] = [set() for _ in range(self.num_users)]
+        for u, t in zip(
+            all_users[train_idx].tolist(), all_tires[train_idx].tolist()
+        ):
+            self.user_reviewed[u].add(t)
+
+        # Per-user training positives. These drive BPR positives and eval masking.
+        self.user_positives: list[set[int]] = [set() for _ in range(self.num_users)]
+        for u, t in zip(self.train_users.tolist(), self.train_tires.tolist()):
+            self.user_positives[u].add(t)
+
+        # Per-user disliked tires from the TRAIN split only.
+        self.user_disliked: list[list[int]] = [[] for _ in range(self.num_users)]
+        train_bad_users = all_users[train_idx][train_bad]
+        train_bad_tires = all_tires[train_idx][train_bad]
+        for u, t in zip(train_bad_users.tolist(), train_bad_tires.tolist()):
+            self.user_disliked[u].append(t)
+
+        # Per-user positives as a list (for fast random.choice during contrast).
+        self.user_positives_list: list[list[int]] = [
+            list(s) for s in self.user_positives
+        ]
+
+        # Pool of users who have BOTH ≥1 good and ≥1 bad TRAIN review.
+        self.contrast_users: torch.Tensor = torch.tensor(
+            [
+                u
+                for u in range(self.num_users)
+                if self.user_positives_list[u] and self.user_disliked[u]
+            ],
+            dtype=torch.long,
+        )
 
         self._gen = torch.Generator().manual_seed(seed + 1)
 
@@ -113,7 +124,7 @@ class BPRSampler:
         neg = torch.randint(0, self.num_tires, (batch_size,), generator=self._gen)
         for i in range(batch_size):
             ui = int(u[i])
-            seen = self.user_positives[ui]
+            seen = self.user_reviewed[ui]
             while int(neg[i]) in seen:
                 neg[i] = int(
                     torch.randint(0, self.num_tires, (1,), generator=self._gen).item()
