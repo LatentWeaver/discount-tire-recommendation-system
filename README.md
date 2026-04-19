@@ -68,7 +68,7 @@ $$ \mathcal{L}_{total} = \mathcal{L}_{BPR} + \lambda_{c} \cdot \mathcal{L}_{clus
 Defaults: $\lambda_{c} = 0.5$, $\lambda_{\text{con}} = 0.3$. Set $\lambda_{\text{con}} = 0$ to ablate the contrastive term.
 
 #### Evaluation Metrics
-Top-K ranking metrics, **not** RMSE:
+
 - **Recall@K** — fraction of held-out positive tires recovered in the top-K predictions.
 - **NDCG@K** — rewards placing positives near the top of the ranked list.
 - **HitRate@K** — at least one relevant tire in top-K.
