@@ -54,11 +54,18 @@ Loss:
 
 $$ \mathcal{L}_{BPR} = -\frac{1}{|B|} \sum_{(u, t^+, t^-) \in B} \log \sigma\big(s(u, t^+) - s(u, t^-)\big) $$
 
-Combined with the auxiliary DeepCluster loss from Path A:
+#### Contrastive Loss — "move users away from bad products"
+For users who have BOTH a good (rating $\geq$ threshold) AND a disliked (rating $<$ threshold) review, sample triplets $(u, t_{\text{good}}, t_{\text{disliked}})$ where both tires are items the user personally owned. The loss explicitly teaches the model to rank good purchases above the user's own disappointments:
 
-$$ \mathcal{L}_{total} = \mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster} $$
+$$ \mathcal{L}_{contrast} = -\frac{1}{|B|} \sum \log \sigma\big(s(u, t_{\text{good}}) - s(u, t_{\text{disliked}})\big) $$
 
-where $\lambda \in [0.1, 1.0]$ controls how strongly the clustering signal regularizes the encoder.
+Unlike random BPR negatives, $t_{\text{disliked}}$ is a tire the user has actually rejected — the strongest available signal for the "transfer away from bad products" goal.
+
+#### Combined Objective
+
+$$ \mathcal{L}_{total} = \mathcal{L}_{BPR} + \lambda_{c} \cdot \mathcal{L}_{cluster} + \lambda_{\text{con}} \cdot \mathcal{L}_{contrast} $$
+
+Defaults: $\lambda_{c} = 0.5$, $\lambda_{\text{con}} = 0.3$. Set $\lambda_{\text{con}} = 0$ to ablate the contrastive term.
 
 #### Evaluation Metrics
 Top-K ranking metrics, **not** RMSE:
@@ -137,3 +144,35 @@ Generates four figures in `outputs/figures/`:
 - `subgraph_sample.png` -- sampled neighbourhood around a few users
 - `degree_distributions.png` -- edge degree histograms per node type
 - `tire_feature_distributions.png` -- distribution of each tire feature
+
+### 5. Train the Recommender
+
+```bash
+uv run python scripts/train.py
+```
+
+Runs the full pipeline `HGT encoder → IntermediateLayer (Path A + B) → FusionMLP` with the joint objective $\mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster}$.
+
+Each epoch:
+1. **Pseudo-label refresh** (every `--refresh-every` epochs): one full graph forward → snapshot `h_tire` → PCA → whiten → ℓ2-norm → k-means → empty-cluster repair → frozen labels for the next $N$ epochs.
+2. **Training steps**: per step the BPR sampler draws $(u, t^+, t^-)$ triplets, the model scores both, and the optimizer minimizes $\mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster}$.
+3. **Eval** (every `--eval-every` epochs): Recall@K / NDCG@K / HitRate@K on the held-out val split, with the user's training positives masked out.
+
+Common knobs:
+
+```bash
+uv run python scripts/train.py \
+  --epochs 30 --batch-size 2048 --lr 5e-4 \
+  --num-clusters 50 --cluster-lambda 0.5 \
+  --refresh-every 2 --rating-threshold 4.0
+```
+
+The script prints per-epoch losses (`L_bpr`, `L_cluster`) and final test-set top-K metrics.
+
+### Smoke Tests
+
+```bash
+uv run python tests/test_hgt_forward.py        # HGT encoder forward
+uv run python tests/test_intermediate_layer.py # Intermediate layer + DeepCluster refresh
+uv run python tests/test_train_step.py         # End-to-end: 1 refresh + 3 train steps + mini eval
+```
