@@ -61,6 +61,10 @@ class Trainer:
     @torch.no_grad()
     def refresh_pseudo_labels(self) -> torch.Tensor:
         """Snapshot h_tire and re-run k-means; freeze the resulting labels."""
+        if self.cluster_lambda <= 0:
+            raise RuntimeError(
+                "refresh_pseudo_labels() should not be called when cluster_lambda <= 0."
+            )
         self.model.eval()
         h_dict = self.model.encoder(self.train_data)
         labels = refresh_pseudo_labels(
@@ -74,7 +78,7 @@ class Trainer:
 
     # ──────────────────────────────────────────────────────────────────
     def train_step(self, batch_size: int = 1024) -> dict[str, float]:
-        if self.pseudo_labels is None:
+        if self.cluster_lambda > 0 and self.pseudo_labels is None:
             self.refresh_pseudo_labels()
 
         self.model.train()
@@ -88,11 +92,13 @@ class Trainer:
         score_neg = self.model.score(out, u.to(device), neg.to(device))
         l_bpr = bpr_loss(score_pos, score_neg)
 
-        l_cluster = deep_cluster_loss(
-            out["cluster_logits"],
-            self.pseudo_labels,
-            num_clusters=self.num_clusters,
-        )
+        l_cluster = torch.zeros((), device=device)
+        if self.cluster_lambda > 0:
+            l_cluster = deep_cluster_loss(
+                out["cluster_logits"],
+                self.pseudo_labels,
+                num_clusters=self.num_clusters,
+            )
 
         l_contrast = torch.zeros((), device=device)
         contrast_batch = self.contrast_batch_size or batch_size
@@ -134,11 +140,14 @@ class Trainer:
         else:
             raise ValueError(f"Unknown split: {split!r}")
 
-        # Train positives only — held-out items must remain rankable.
-        train_pos: list[set[int]] = [set() for _ in range(self.sampler.num_users)]
-        for u_i, t_i in zip(
-            self.sampler.train_users.tolist(), self.sampler.train_tires.tolist()
-        ):
-            train_pos[u_i].add(t_i)
-
-        return _evaluate(self.model, self.train_data, users, tires, train_pos, ks=ks)
+        # Mask every tire the user already saw in train (good *and* bad) —
+        # disliked train items otherwise compete with held-out positives in
+        # the ranking and depress recall.
+        return _evaluate(
+            self.model,
+            self.train_data,
+            users,
+            tires,
+            self.sampler.user_reviewed_train,
+            ks=ks,
+        )

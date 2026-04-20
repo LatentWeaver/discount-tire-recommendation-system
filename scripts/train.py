@@ -52,12 +52,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--steps-per-epoch", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=1024)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--weight-decay", type=float, default=1e-5)
-    p.add_argument("--hidden-dim", type=int, default=128)
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--weight-decay", type=float, default=1e-3)
+    p.add_argument("--hidden-dim", type=int, default=64)
     p.add_argument("--num-layers", type=int, default=2)
     p.add_argument("--num-heads", type=int, default=4)
     p.add_argument("--num-clusters", type=int, default=50)
+    p.add_argument("--dropout", type=float, default=0.3,
+                   help="Dropout rate applied in encoder, intermediate, and fusion.")
     p.add_argument("--cluster-lambda", type=float, default=0.5)
     p.add_argument("--contrast-lambda", type=float, default=0.3,
                    help="Weight on the bad-vs-good contrastive loss. 0 disables it.")
@@ -67,10 +69,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--refresh-every", type=int, default=2,
                    help="Re-run k-means every N epochs.")
     p.add_argument("--rating-threshold", type=float, default=4.0)
-    p.add_argument("--eval-every", type=int, default=5)
+    p.add_argument("--eval-every", type=int, default=1)
+    p.add_argument("--best-metric", type=str, default="Recall@20",
+                   help="Val metric used to pick the best checkpoint.")
     p.add_argument("--save-path", type=str,
                    default="outputs/checkpoints/recommender.pt",
-                   help="Where to save the final model state_dict.")
+                   help="Where to save the best model state_dict.")
     p.add_argument("--device", type=str, default=None,
                    help="Force device: cuda / mps / cpu. Defaults to best available.")
     p.add_argument("--seed", type=int, default=0)
@@ -93,6 +97,7 @@ def main() -> None:
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         num_clusters=args.num_clusters,
+        dropout=args.dropout,
     ).to(device)
 
     sampler = BPRSampler(
@@ -123,8 +128,12 @@ def main() -> None:
         f"Test: {sampler.test_users.size(0):,}"
     )
 
+    best_val = float("-inf")
+    best_state: dict[str, torch.Tensor] | None = None
+    best_epoch = 0
+
     for epoch in range(1, args.epochs + 1):
-        if (epoch - 1) % args.refresh_every == 0:
+        if args.cluster_lambda > 0 and (epoch - 1) % args.refresh_every == 0:
             trainer.refresh_pseudo_labels()
             print(f"[epoch {epoch:>3d}] refreshed pseudo-labels")
 
@@ -166,7 +175,28 @@ def main() -> None:
             )
             msg += f"  {metric_str}"
 
+            val_score = metrics.get(args.best_metric)
+            if val_score is None:
+                raise KeyError(
+                    f"--best-metric={args.best_metric!r} not in eval output "
+                    f"(keys: {sorted(metrics)})"
+                )
+            if val_score > best_val:
+                best_val = val_score
+                best_epoch = epoch
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
+                msg += f"  * best {args.best_metric}"
+
         print(msg)
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(
+            f"\nRestored best checkpoint from epoch {best_epoch} "
+            f"({args.best_metric}={best_val:.4f})"
+        )
 
     print("\nFinal test metrics:")
     test_metrics = trainer.evaluate(split="test", ks=(10, 20, 50))
@@ -177,7 +207,7 @@ def main() -> None:
     save_path = (PROJECT_ROOT / p.parent / f"{p.stem}_e{args.epochs}{p.suffix}").resolve()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), save_path)
-    print(f"\nSaved final weights → {save_path}")
+    print(f"\nSaved best weights → {save_path}")
 
 
 if __name__ == "__main__":
