@@ -15,13 +15,14 @@ To fully leverage **HGT**, tires are not treated as isolated points; instead, we
     - `Brand`: Captures brand loyalties and preferences (e.g., "Michelin", "Landspider").
     - `Size`: The most critical node for tire recommendation (e.g., "235/40R18"). Tires with the same specifications are naturally clustered through this node.
 - **Edge Types (Meta-Relations)**:
-    - `User -[reviews]-> Tire`: Weighted by the review rating.
+    - `User -[reviews]-> Tire`: Carries a review rating scalar used by the HGT review-relation attention/message transforms.
     - `Tire -[belongs_to]-> Brand`: Brand affiliation.
     - `Tire -[has_spec]-> Size`: Specification grouping.
 
 ### Feature Extraction Layer (HGT Encoder)
 The **HGT Network** addresses the graph's heterogeneity by dynamically learning the importance of different meta-relations (e.g., recognizing that "Size" often carries a higher weight than "Brand").
 - **Output:** High-dimensional Node Embeddings ($h_{user}$ and $h_{tire}$).
+- **User representation:** user nodes start from a shared learnable seed vector and become personalized through review-graph message passing, which keeps cold-start inference compatible with the training architecture.
 - **Advantage:** HGT automatically uncovers deep latent associations, such as learning that "a specific sized tire is vastly more popular within a certain brand."
 
 ### Intermediate Layer: Dual-Path Processing
@@ -47,15 +48,15 @@ $$ s(u, t) = \text{MLP}(\underbrace{h_{user} \oplus h_{tire}}_{\text{Individual 
 The output is a raw scalar — higher means "more relevant for this user".
 #### Training Objective: BPR (Pairwise Ranking)
 Per training step, sample triplets $(u, t^+, t^-)$ where:
-- $t^+$ — a tire the user actually engaged with (review rating $\geq 4$).
-- $t^-$ — a randomly sampled tire the user has not reviewed (preferably matching the same `size` to avoid trivial negatives).
+- $t^+$ — a tire from the user's **train-split** positive reviews (rating $\geq 4$).
+- $t^-$ — a randomly sampled tire absent from the user's **train-split** reviews.
 
 Loss:
 
 $$ \mathcal{L}_{BPR} = -\frac{1}{|B|} \sum_{(u, t^+, t^-) \in B} \log \sigma\big(s(u, t^+) - s(u, t^-)\big) $$
 
 #### Contrastive Loss — "move users away from bad products"
-For users who have BOTH a good (rating $\geq$ threshold) AND a disliked (rating $<$ threshold) review, sample triplets $(u, t_{\text{good}}, t_{\text{disliked}})$ where both tires are items the user personally owned. The loss explicitly teaches the model to rank good purchases above the user's own disappointments:
+For users who have BOTH a good (rating $\geq$ threshold) AND a disliked (rating $<$ threshold) **train-split** review, sample triplets $(u, t_{\text{good}}, t_{\text{disliked}})$ where both tires are items the user personally owned in train. The loss explicitly teaches the model to rank good purchases above the user's own disappointments:
 
 $$ \mathcal{L}_{contrast} = -\frac{1}{|B|} \sum \log \sigma\big(s(u, t_{\text{good}}) - s(u, t_{\text{disliked}})\big) $$
 
@@ -68,6 +69,8 @@ $$ \mathcal{L}_{total} = \mathcal{L}_{BPR} + \lambda_{c} \cdot \mathcal{L}_{clus
 Defaults: $\lambda_{c} = 0.5$, $\lambda_{\text{con}} = 0.3$. Set $\lambda_{\text{con}} = 0$ to ablate the contrastive term.
 
 #### Evaluation Metrics
+
+Validation and test pairs are held out at the review-edge level. The encoder, pseudo-label refresh, and all ranking passes run on the **train-only review graph**; held-out positives are used only as labels.
 
 - **Recall@K** — fraction of held-out positive tires recovered in the top-K predictions.
 - **NDCG@K** — rewards placing positives near the top of the ranked list.
@@ -151,12 +154,13 @@ Generates four figures in `outputs/figures/`:
 uv run python scripts/train.py
 ```
 
-Runs the full pipeline `HGT encoder → IntermediateLayer (Path A + B) → FusionMLP` with the joint objective $\mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster}$.
+Runs the full pipeline `HGT encoder → IntermediateLayer (Path A + B) → FusionMLP` with the joint objective $\mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster}$ on a **train-only review graph**.
 
 Each epoch:
-1. **Pseudo-label refresh** (every `--refresh-every` epochs): one full graph forward → snapshot `h_tire` → PCA → whiten → ℓ2-norm → k-means → empty-cluster repair → frozen labels for the next $N$ epochs.
-2. **Training steps**: per step the BPR sampler draws $(u, t^+, t^-)$ triplets, the model scores both, and the optimizer minimizes $\mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster}$.
-3. **Eval** (every `--eval-every` epochs): Recall@K / NDCG@K / HitRate@K on the held-out val split, with the user's training positives masked out.
+1. **Edge split**: review edges are partitioned once into `train / val / test`; the train partition becomes the encoder graph, while val/test edges are retained only as held-out labels.
+2. **Pseudo-label refresh** (every `--refresh-every` epochs): one train-graph forward → snapshot `h_tire` → PCA → whiten → ℓ2-norm → k-means → empty-cluster repair → frozen labels for the next $N$ epochs.
+3. **Training steps**: per step the BPR sampler draws train-only $(u, t^+, t^-)$ triplets, the model scores both, and the optimizer minimizes $\mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster} + \lambda_{\text{con}} \cdot \mathcal{L}_{contrast}$.
+4. **Eval** (every `--eval-every` epochs): Recall@K / NDCG@K / HitRate@K on held-out val edges, scored with embeddings from the train-only graph and with train positives masked out.
 
 Common knobs:
 
@@ -177,13 +181,13 @@ uv run python tests/test_intermediate_layer.py # Intermediate layer + DeepCluste
 uv run python tests/test_train_step.py         # End-to-end: 1 refresh + 3 train steps + mini eval
 ```
 
-### 6. Recommend (Inductive GNN Inference)
+### 6. Recommend (Cold-Start Graph Inference)
 
 ```bash
 # Existing user (by index):
 uv run python scripts/inference.py --user 42 --k 10
 
-# New user with structured preferences (Inductive GNN):
+# New user with structured preferences:
 uv run python scripts/inference.py --user new \
   --brand "Michelin,Continental" \
   --size "235/40R18" \
@@ -193,10 +197,10 @@ uv run python scripts/inference.py --user new \
   --k 10
 ```
 
-For **new users**, the script uses Inductive GNN inference:
+For **new users**, the script uses the same graph encoder as training:
 1. Finds tires matching the preference filters (AND logic).
-2. Injects a temporary user node into the graph with preference edges to matching tires.
-3. Runs the full HGT → Intermediate → FusionMLP pipeline on the augmented graph.
+2. Injects a temporary user node into the train graph with preference edges to matching tires.
+3. Starts that node from the same shared user seed used during training, then runs the full HGT → Intermediate → FusionMLP pipeline on the augmented graph.
 4. Returns top-K scored tires with names and cluster IDs.
 
 | Filter | Flag | Example |
@@ -207,4 +211,3 @@ For **new users**, the script uses Inductive GNN inference:
 | Treadwear | `--min-treadwear` | `400` |
 | Traction | `--traction` | `A` (grades: AA > A > B > C) |
 | Temperature | `--temperature` | `A` (grades: A > B > C) |
-

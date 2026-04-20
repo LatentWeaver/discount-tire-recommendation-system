@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Inductive GNN inference script.
+Cold-start graph inference script.
 
 Recommend top-K tires for an existing user or a **new** user. For new users,
 the script injects a temporary node into the heterogeneous graph with
 preference-based edges, then runs the full HGT → Intermediate → FusionMLP
-pipeline (Inductive GNN) — the same model used during training.
+pipeline used during training. User nodes start from a shared learnable
+seed, so the cold-start user follows the same initialization scheme as
+training-time users instead of relying on a user-specific ID embedding.
 
 Usage
 -----
@@ -34,12 +36,12 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import pandas as pd
 import torch
-import torch.nn as nn
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.models import TireRecommender
+from src.training.sampler import BPRSampler
 
 
 # ─── Utilities ────────────────────────────────────────────────────────
@@ -108,7 +110,7 @@ def find_matching_tires(
     return [tire_map[t] for t in matched_titles if t in tire_map]
 
 
-# ─── Inductive GNN: inject new user into graph ───────────────────────
+# ─── Cold-start graph inference ──────────────────────────────────────
 
 @torch.no_grad()
 def recommend_existing_user(
@@ -152,11 +154,11 @@ def recommend_new_user(
     default_rating: float = 4.5,
 ) -> list[dict]:
     """
-    Inductive GNN inference for a new user.
+    Cold-start graph inference for a new user.
 
     1. Deep-copy the graph.
-    2. Add a new user node (initialized with the mean of all existing user
-       embeddings) and preference edges to matching tires.
+    2. Add a new user node with the same shared user seed used at training
+       time, plus preference edges to matching tires.
     3. Run the full HGT → Intermediate → FusionMLP pipeline.
     4. Return top-K scored tires for the new user.
     """
@@ -168,19 +170,7 @@ def recommend_new_user(
     data["user"].num_nodes = new_user_idx + 1
     data["user"].node_id = torch.arange(new_user_idx + 1, device=device)
 
-    # ── 2. Expand user embedding table with mean-init row. ───────────
-    old_emb = model.encoder.input_emb["user"]                 # nn.Embedding
-    old_weights = old_emb.weight.data                          # (N, 128)
-    mean_row = old_weights.mean(dim=0, keepdim=True)           # (1, 128)
-    new_weights = torch.cat([old_weights, mean_row], dim=0)    # (N+1, 128)
-
-    # Temporarily replace the embedding table.
-    orig_emb = model.encoder.input_emb["user"]
-    model.encoder.input_emb["user"] = nn.Embedding.from_pretrained(
-        new_weights, freeze=True
-    ).to(device)
-
-    # ── 3. Add preference edges (user ↔ matching tires). ─────────────
+    # ── 2. Add preference edges (user ↔ matching tires). ─────────────
     matching = torch.tensor(matching_tires, dtype=torch.long, device=device)
     n_match = matching.size(0)
     new_user_col = torch.full((n_match,), new_user_idx, dtype=torch.long, device=device)
@@ -203,7 +193,7 @@ def recommend_new_user(
     old_rv_attr = data["tire", "rev_by", "user"].edge_attr.to(device)
     data["tire", "rev_by", "user"].edge_attr = torch.cat([old_rv_attr, new_attr], dim=0)
 
-    # ── 4. Full HGT forward → Intermediate → FusionMLP. ─────────────
+    # ── 3. Full HGT forward → Intermediate → FusionMLP. ─────────────
     model.eval()
     out = model.encode(data)
 
@@ -226,9 +216,6 @@ def recommend_new_user(
             "score": round(score, 4), "top_cluster": top_cluster,
         })
 
-    # ── 5. Restore original embedding table. ─────────────────────────
-    model.encoder.input_emb["user"] = orig_emb
-
     return results
 
 
@@ -236,7 +223,7 @@ def recommend_new_user(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Recommend tires using Inductive GNN inference."
+        description="Recommend tires using cold-start graph inference."
     )
     p.add_argument(
         "--user", type=str, required=True,
@@ -251,6 +238,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-layers", type=int, default=2)
     p.add_argument("--num-heads", type=int, default=4)
     p.add_argument("--num-clusters", type=int, default=50)
+    p.add_argument("--rating-threshold", type=float, default=4.0)
+    p.add_argument(
+        "--split-seed",
+        type=int,
+        default=0,
+        help="Seed used to reconstruct the train-only review graph.",
+    )
 
     # New-user preference filters.
     p.add_argument("--brand", type=str, default=None,
@@ -283,6 +277,12 @@ def main() -> None:
 
     device = pick_device(args.device)
     data = data.to(device)
+    sampler = BPRSampler(
+        data,
+        rating_threshold=args.rating_threshold,
+        seed=args.split_seed,
+    )
+    inference_data = sampler.train_data
 
     # Reverse maps: node index → human-readable name.
     idx_to_tire = {v: k for k, v in mappings["tire_map"].items()}
@@ -290,7 +290,7 @@ def main() -> None:
 
     # ── Load model ───────────────────────────────────────────────────
     model = TireRecommender.from_data(
-        data,
+        inference_data,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
@@ -306,8 +306,8 @@ def main() -> None:
     model.load_state_dict(state_dict)
     model.eval()
 
-    num_users = data["user"].num_nodes
-    num_tires = data["tire"].num_nodes
+    num_users = inference_data["user"].num_nodes
+    num_tires = inference_data["tire"].num_nodes
 
     # ── Route: existing user vs. new user ────────────────────────────
     if args.user.lower() == "new":
@@ -345,7 +345,7 @@ def main() -> None:
             sys.exit(1)
 
         print(f"Injecting new user node with {len(matching)} preference edges ...")
-        results = recommend_new_user(model, data, matching, k=args.k)
+        results = recommend_new_user(model, inference_data, matching, k=args.k)
 
     else:
         user_idx = int(args.user)
@@ -353,7 +353,9 @@ def main() -> None:
             print(f"Error: user index must be in [0, {num_users - 1}]")
             sys.exit(1)
         print(f"\nExisting user: {user_idx}")
-        results, _ = recommend_existing_user(model, data, user_idx, k=args.k)
+        results, _ = recommend_existing_user(
+            model, inference_data, user_idx, k=args.k
+        )
 
     # ── Print results ────────────────────────────────────────────────
     print(f"\nTop-{args.k} Recommended Tires:")

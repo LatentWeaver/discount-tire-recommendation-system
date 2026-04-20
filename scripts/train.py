@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 # Allow CPU fallback for any MPS op not yet implemented (some PyG scatter
@@ -25,6 +26,7 @@ from pathlib import Path
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import torch
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -127,15 +129,30 @@ def main() -> None:
             print(f"[epoch {epoch:>3d}] refreshed pseudo-labels")
 
         agg = {"loss": 0.0, "L_bpr": 0.0, "L_cluster": 0.0, "L_contrast": 0.0}
-        for _ in range(args.steps_per_epoch):
+        epoch_start = time.time()
+        progress = tqdm(
+            range(args.steps_per_epoch),
+            desc=f"Epoch {epoch:>3d}/{args.epochs}",
+            leave=False,
+            dynamic_ncols=True,
+        )
+        for _ in progress:
             stats = trainer.train_step(batch_size=args.batch_size)
             for k in agg:
                 agg[k] += stats[k]
+            progress.set_postfix(
+                loss=f"{stats['loss']:.4f}",
+                bpr=f"{stats['L_bpr']:.4f}",
+                cluster=f"{stats['L_cluster']:.4f}",
+                contrast=f"{stats['L_contrast']:.4f}",
+            )
         for k in agg:
             agg[k] /= args.steps_per_epoch
+        epoch_time = time.time() - epoch_start
 
         msg = (
             f"[epoch {epoch:>3d}] "
+            f"time={epoch_time:.1f}s "
             f"loss={agg['loss']:.4f} "
             f"BPR={agg['L_bpr']:.4f} "
             f"cluster={agg['L_cluster']:.4f} "

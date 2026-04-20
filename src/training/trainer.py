@@ -10,6 +10,10 @@ Exposes:
   - ``refresh_pseudo_labels()`` — call every N epochs
   - ``train_step(batch_size)`` — one optimizer step on L_BPR + λ·L_cluster
   - ``evaluate(...)`` — proxied through src.training.evaluation
+
+The trainer always encodes ``sampler.train_data`` rather than the full
+graph, so held-out validation/test review edges do not leak into message
+passing or pseudo-label refresh.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ class Trainer:
     ) -> None:
         self.model = model
         self.data = data
+        self.train_data = sampler.train_data
         self.sampler = sampler
         self.optimizer = optimizer
         self.cluster_lambda = cluster_lambda
@@ -57,7 +62,7 @@ class Trainer:
     def refresh_pseudo_labels(self) -> torch.Tensor:
         """Snapshot h_tire and re-run k-means; freeze the resulting labels."""
         self.model.eval()
-        h_dict = self.model.encoder(self.data)
+        h_dict = self.model.encoder(self.train_data)
         labels = refresh_pseudo_labels(
             h_dict["tire"],
             num_clusters=self.num_clusters,
@@ -75,7 +80,7 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad()
 
-        out = self.model.encode(self.data)
+        out = self.model.encode(self.train_data)
         device = out["h_user_t"].device
 
         u, pos, neg = self.sampler.sample(batch_size)
@@ -136,4 +141,4 @@ class Trainer:
         ):
             train_pos[u_i].add(t_i)
 
-        return _evaluate(self.model, self.data, users, tires, train_pos, ks=ks)
+        return _evaluate(self.model, self.train_data, users, tires, train_pos, ks=ks)

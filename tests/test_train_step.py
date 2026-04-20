@@ -48,6 +48,12 @@ def main() -> None:
         f"val: {sampler.val_users.size(0):,}, "
         f"test: {sampler.test_users.size(0):,}"
     )
+    train_review_edges = sampler.train_data["user", "reviews", "tire"].edge_index.size(1)
+    full_review_edges = data["user", "reviews", "tire"].edge_index.size(1)
+    print(
+        f"Train graph review edges: {train_review_edges:,} / "
+        f"full graph review edges: {full_review_edges:,}"
+    )
     print(
         f"Contrast pool — {sampler.contrast_users.numel():,} users "
         f"have both good AND disliked reviews"
