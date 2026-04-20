@@ -36,6 +36,7 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import pandas as pd
 import torch
+import torch.nn as nn
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -157,8 +158,8 @@ def recommend_new_user(
     Cold-start graph inference for a new user.
 
     1. Deep-copy the graph.
-    2. Add a new user node with the same shared user seed used at training
-       time, plus preference edges to matching tires.
+    2. Add a new user node and initialize its embedding from the mean of
+       existing user embeddings, plus preference edges to matching tires.
     3. Run the full HGT → Intermediate → FusionMLP pipeline.
     4. Return top-K scored tires for the new user.
     """
@@ -170,7 +171,18 @@ def recommend_new_user(
     data["user"].num_nodes = new_user_idx + 1
     data["user"].node_id = torch.arange(new_user_idx + 1, device=device)
 
-    # ── 2. Add preference edges (user ↔ matching tires). ─────────────
+    # ── 2. Expand user embedding table with mean-init row. ───────────
+    old_emb = model.encoder.input_emb["user"]
+    old_weights = old_emb.weight.data
+    mean_row = old_weights.mean(dim=0, keepdim=True)
+    new_weights = torch.cat([old_weights, mean_row], dim=0)
+
+    orig_emb = model.encoder.input_emb["user"]
+    model.encoder.input_emb["user"] = nn.Embedding.from_pretrained(
+        new_weights, freeze=True
+    ).to(device)
+
+    # ── 3. Add preference edges (user ↔ matching tires). ─────────────
     matching = torch.tensor(matching_tires, dtype=torch.long, device=device)
     n_match = matching.size(0)
     new_user_col = torch.full((n_match,), new_user_idx, dtype=torch.long, device=device)
@@ -193,7 +205,7 @@ def recommend_new_user(
     old_rv_attr = data["tire", "rev_by", "user"].edge_attr.to(device)
     data["tire", "rev_by", "user"].edge_attr = torch.cat([old_rv_attr, new_attr], dim=0)
 
-    # ── 3. Full HGT forward → Intermediate → FusionMLP. ─────────────
+    # ── 4. Full HGT forward → Intermediate → FusionMLP. ─────────────
     model.eval()
     out = model.encode(data)
 
@@ -215,6 +227,9 @@ def recommend_new_user(
             "rank": rank, "tire_idx": t_idx,
             "score": round(score, 4), "top_cluster": top_cluster,
         })
+
+    # ── 5. Restore original embedding table. ─────────────────────────
+    model.encoder.input_emb["user"] = orig_emb
 
     return results
 

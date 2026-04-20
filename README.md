@@ -15,14 +15,14 @@ To fully leverage **HGT**, tires are not treated as isolated points; instead, we
     - `Brand`: Captures brand loyalties and preferences (e.g., "Michelin", "Landspider").
     - `Size`: The most critical node for tire recommendation (e.g., "235/40R18"). Tires with the same specifications are naturally clustered through this node.
 - **Edge Types (Meta-Relations)**:
-    - `User -[reviews]-> Tire`: Carries a review rating scalar used by the HGT review-relation attention/message transforms.
+    - `User -[reviews]-> Tire`: Review relation. The rating is stored on the edge for sampling and thresholding, while the HGT layer itself follows type-based heterogeneous attention.
     - `Tire -[belongs_to]-> Brand`: Brand affiliation.
     - `Tire -[has_spec]-> Size`: Specification grouping.
 
 ### Feature Extraction Layer (HGT Encoder)
 The **HGT Network** addresses the graph's heterogeneity by dynamically learning the importance of different meta-relations (e.g., recognizing that "Size" often carries a higher weight than "Brand").
 - **Output:** High-dimensional Node Embeddings ($h_{user}$ and $h_{tire}$).
-- **User representation:** user nodes start from a shared learnable seed vector and become personalized through review-graph message passing, which keeps cold-start inference compatible with the training architecture.
+- **User representation:** featureless node types, including users, are initialized through learnable node embeddings before heterogeneous message passing.
 - **Advantage:** HGT automatically uncovers deep latent associations, such as learning that "a specific sized tire is vastly more popular within a certain brand."
 
 ### Intermediate Layer: Dual-Path Processing
@@ -200,7 +200,7 @@ uv run python scripts/inference.py --user new \
 For **new users**, the script uses the same graph encoder as training:
 1. Finds tires matching the preference filters (AND logic).
 2. Injects a temporary user node into the train graph with preference edges to matching tires.
-3. Starts that node from the same shared user seed used during training, then runs the full HGT → Intermediate → FusionMLP pipeline on the augmented graph.
+3. Initializes that node from the mean of existing user embeddings, then runs the full HGT → Intermediate → FusionMLP pipeline on the augmented graph.
 4. Returns top-K scored tires with names and cluster IDs.
 
 | Filter | Flag | Example |

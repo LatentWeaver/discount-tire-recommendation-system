@@ -15,7 +15,6 @@ Usage
 
 from __future__ import annotations
 
-import copy
 import sys
 from pathlib import Path
 
@@ -61,18 +60,7 @@ def main() -> None:
         num_heads=4,
         num_clusters=50,
     )
-    assert "user" not in model.encoder.input_emb
-    assert "user" in model.encoder.type_seed
-
-    model.eval()
-    with torch.no_grad():
-        base_out = model.encoder(sampler.train_data)
-        altered_graph = copy.deepcopy(sampler.train_data)
-        altered_graph["user", "reviews", "tire"].edge_attr.zero_()
-        altered_graph["tire", "rev_by", "user"].edge_attr.zero_()
-        altered_out = model.encoder(altered_graph)
-    diff = (base_out["user"] - altered_out["user"]).abs().max().item()
-    assert diff > 1e-6, "Review edge_attr no longer affects encoder output"
+    assert "user" in model.encoder.input_emb
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     trainer = Trainer(

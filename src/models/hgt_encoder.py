@@ -6,9 +6,7 @@ produce contextualised embeddings for every node type in the graph.
 
 Input projection strategy:
     - Node types with a feature matrix ``data[nt].x``  → ``nn.Linear``
-    - Featureless node types with shared seeds (user by default)
-      → one learnable vector repeated across all nodes of that type
-    - Other featureless node types (brand / size)       → ``nn.Embedding``
+    - Featureless node types                           → ``nn.Embedding``
       (indexed by ``data[nt].node_id``; falls back to ``arange(num_nodes)``).
 """
 
@@ -32,14 +30,12 @@ class HGTEncoder(nn.Module):
         use_norm: bool = True,
         in_dim_dict: dict[str, int] | None = None,
         num_nodes_dict: dict[str, int] | None = None,
-        shared_seed_node_types: tuple[str, ...] = ("user",),
     ) -> None:
         super().__init__()
         node_types, edge_types = metadata
 
         in_dim_dict = in_dim_dict or {}
         num_nodes_dict = num_nodes_dict or {}
-        self.shared_seed_node_types = set(shared_seed_node_types)
 
         self.hidden_dim = hidden_dim
         self.node_types = list(node_types)
@@ -47,13 +43,9 @@ class HGTEncoder(nn.Module):
 
         self.input_proj = nn.ModuleDict()
         self.input_emb = nn.ModuleDict()
-        self.type_seed = nn.ParameterDict()
         for nt in self.node_types:
             if nt in in_dim_dict:
                 self.input_proj[nt] = nn.Linear(in_dim_dict[nt], hidden_dim)
-            elif nt in self.shared_seed_node_types:
-                self.type_seed[nt] = nn.Parameter(torch.empty(hidden_dim))
-                nn.init.normal_(self.type_seed[nt], std=0.02)
             elif nt in num_nodes_dict:
                 self.input_emb[nt] = nn.Embedding(num_nodes_dict[nt], hidden_dim)
             else:
@@ -85,7 +77,6 @@ class HGTEncoder(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.2,
         use_norm: bool = True,
-        shared_seed_node_types: tuple[str, ...] = ("user",),
     ) -> "HGTEncoder":
         """Build an encoder configured to match a ``HeteroData`` instance."""
         in_dim_dict: dict[str, int] = {}
@@ -106,7 +97,6 @@ class HGTEncoder(nn.Module):
             use_norm=use_norm,
             in_dim_dict=in_dim_dict,
             num_nodes_dict=num_nodes_dict,
-            shared_seed_node_types=shared_seed_node_types,
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -116,8 +106,6 @@ class HGTEncoder(nn.Module):
             store = data[nt]
             if nt in self.input_proj:
                 h[nt] = self.input_proj[nt](store.x)
-            elif nt in self.type_seed:
-                h[nt] = self.type_seed[nt].unsqueeze(0).expand(store.num_nodes, -1)
             else:
                 emb = self.input_emb[nt]
                 ids = getattr(store, "node_id", None)
@@ -129,11 +117,6 @@ class HGTEncoder(nn.Module):
     def forward(self, data: HeteroData) -> dict[str, torch.Tensor]:
         h_dict = self._initial_embeddings(data)
         edge_index_dict = data.edge_index_dict
-        edge_attr_dict = {
-            edge_type: data[edge_type].edge_attr
-            for edge_type in data.edge_types
-            if getattr(data[edge_type], "edge_attr", None) is not None
-        }
         for layer in self.layers:
-            h_dict = layer(h_dict, edge_index_dict, edge_attr_dict=edge_attr_dict)
+            h_dict = layer(h_dict, edge_index_dict)
         return h_dict

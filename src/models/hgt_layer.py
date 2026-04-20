@@ -10,10 +10,6 @@ Per meta-relation ⟨τ(s), ϕ(e), τ(t)⟩ the layer computes:
     Message:    Eq. (4)   MSG-head_i(s,e,t) = M_i(s) · W^MSG_{ϕ(e)}
     Update:     Eq. (5)   H^(l)[t] = A-Linear_{τ(t)}( σ( H̃^(l)[t] ) ) + H^(l-1)[t]
 
-This implementation additionally supports scalar edge attributes on a
-relation. When present, they bias the per-head attention logits and gate
-message magnitude, which lets review ratings affect message passing.
-
 Parameter sharing:
     K-/Q-/M-/A-Linear       → indexed by node type τ
     W^ATT, W^MSG            → indexed by edge type ϕ
@@ -76,23 +72,15 @@ class HGTLayer(nn.Module):
         # One (d_k × d_k) matrix per head per edge type.
         self.w_att = nn.ParameterDict()
         self.w_msg = nn.ParameterDict()
-        self.edge_att_bias = nn.ModuleDict()
-        self.edge_msg_gate = nn.ModuleDict()
         # ── Per-meta-relation prior scalar μ (one per head) ─────────────
         self.mu = nn.ParameterDict()
         for et in self.edge_types:
             key = self._edge_key(et)
             self.w_att[key] = nn.Parameter(torch.empty(num_heads, self.d_k, self.d_k))
             self.w_msg[key] = nn.Parameter(torch.empty(num_heads, self.d_k, self.d_k))
-            self.edge_att_bias[key] = nn.Linear(1, num_heads)
-            self.edge_msg_gate[key] = nn.Linear(1, num_heads)
             self.mu[key] = nn.Parameter(torch.ones(num_heads))
             nn.init.xavier_uniform_(self.w_att[key])
             nn.init.xavier_uniform_(self.w_msg[key])
-            nn.init.xavier_uniform_(self.edge_att_bias[key].weight)
-            nn.init.zeros_(self.edge_att_bias[key].bias)
-            nn.init.xavier_uniform_(self.edge_msg_gate[key].weight)
-            nn.init.zeros_(self.edge_msg_gate[key].bias)
 
         # ── Gated residual (learnable α per target node type) ──────────
         # Follows the reference pyHGT implementation: H = α·new + (1-α)·H_prev.
@@ -112,11 +100,9 @@ class HGTLayer(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict[EdgeType, torch.Tensor],
-        edge_attr_dict: dict[EdgeType, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         H = self.num_heads
         Dk = self.d_k
-        edge_attr_dict = edge_attr_dict or {}
 
         # Project every node type once into K, Q, M spaces (Eq. 3 / 4 first step).
         K = {nt: self.k_lin[nt](x).view(-1, H, Dk) for nt, x in x_dict.items()}
@@ -150,18 +136,6 @@ class HGTLayer(nn.Module):
 
             # Message: m · W^MSG, per head.  (E, H, Dk) × (H, Dk, Dk) → (E, H, Dk)
             msg = torch.einsum("ehd,hdf->ehf", m_s, self.w_msg[key])
-
-            edge_attr = edge_attr_dict.get(edge_type)
-            if edge_attr is not None:
-                edge_feat = edge_attr.float().to(att_logits.device)
-                if edge_feat.dim() == 1:
-                    edge_feat = edge_feat.unsqueeze(-1)
-                elif edge_feat.size(-1) != 1:
-                    edge_feat = edge_feat.mean(dim=-1, keepdim=True)
-
-                att_logits = att_logits + self.edge_att_bias[key](edge_feat)
-                msg_scale = 1.0 + torch.sigmoid(self.edge_msg_gate[key](edge_feat))
-                msg = msg * msg_scale.unsqueeze(-1)
 
             buckets[dst_type].append((att_logits, msg, dst))
 
