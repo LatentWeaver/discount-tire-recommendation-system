@@ -70,6 +70,9 @@ def parse_args() -> argparse.Namespace:
                    help="Re-run k-means every N epochs.")
     p.add_argument("--rating-threshold", type=float, default=4.0)
     p.add_argument("--eval-every", type=int, default=1)
+    p.add_argument("--graph-path", type=str,
+                   default="data/processed/hetero_graph.pt",
+                   help="Path to a graph payload produced by a build script.")
     p.add_argument("--best-metric", type=str, default="Recall@20",
                    help="Val metric used to pick the best checkpoint.")
     p.add_argument("--save-path", type=str,
@@ -85,7 +88,7 @@ def main() -> None:
     args = parse_args()
     torch.manual_seed(args.seed)
 
-    graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph.pt"
+    graph_path = PROJECT_ROOT / args.graph_path
     data = torch.load(graph_path, weights_only=False)["graph"]
 
     device = pick_device(args.device)
