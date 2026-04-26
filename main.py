@@ -1,5 +1,5 @@
 def main():
-    print("Hello from discount-tire-recommendation-system!")
+    print("Hello from hgt-recommendation-benchmark!")
 
 
 if __name__ == "__main__":

@@ -1,21 +1,9 @@
 """
-BPR + contrastive triplet sampler.
+BPR + contrastive triplet sampler for user-item review graphs.
 
-Two sampling streams sharing one user / item index:
-
-  ``sample()`` — BPR triplets (u, t+, t-)
-      t+  = a tire u rated at or above ``rating_threshold``
-      t-  = a random tire absent from the user's train-split reviews
-
-  ``sample_contrast()`` — contrastive triplets (u, t_good, t_disliked)
-      t_good     = a tire u rated at or above ``rating_threshold``
-      t_disliked = a tire u rated *below* ``rating_threshold``
-      Only sampled from users who have at least one of each in train.
-
-Random train / val / test split happens here so the trainer and
-evaluator share the same partition. The split object also materialises
-the train-only review graph used by the encoder, which prevents held-out
-review edges from leaking into message passing.
+Expected graph schema:
+    user --reviews--> item
+    item --rev_by--> user
 """
 
 from __future__ import annotations
@@ -31,9 +19,9 @@ from torch_geometric.data import HeteroData
 class ReviewEdgeSplit:
     """Canonical train / val / test split over review edges.
 
-    The split reserves at least one review edge per tire in train before
+    The split reserves at least one review edge per item in train before
     assigning the remaining review edges to validation/test. This avoids
-    placing a tire entirely outside the train interaction graph.
+    placing an item entirely outside the train interaction graph.
     """
 
     train_idx: torch.Tensor
@@ -49,20 +37,20 @@ class ReviewEdgeSplit:
         test_ratio: float = 0.1,
         seed: int = 0,
     ) -> "ReviewEdgeSplit":
-        edge_index = data["user", "reviews", "tire"].edge_index
+        edge_index = data["user", "reviews", "item"].edge_index
         n = edge_index.size(1)
-        tires = edge_index[1].tolist()
+        items = edge_index[1].tolist()
 
         g = torch.Generator().manual_seed(seed)
         n_test = int(n * test_ratio)
         n_val = int(n * val_ratio)
-        tire_to_edges: dict[int, list[int]] = {}
-        for edge_idx, tire_idx in enumerate(tires):
-            tire_to_edges.setdefault(tire_idx, []).append(edge_idx)
+        item_to_edges: dict[int, list[int]] = {}
+        for edge_idx, item_idx in enumerate(items):
+            item_to_edges.setdefault(item_idx, []).append(edge_idx)
 
         reserved_train: list[int] = []
         candidate_holdout: list[int] = []
-        for edge_ids in tire_to_edges.values():
+        for edge_ids in item_to_edges.values():
             order = torch.randperm(len(edge_ids), generator=g).tolist()
             keep_train = edge_ids[order[0]]
             reserved_train.append(keep_train)
@@ -72,7 +60,7 @@ class ReviewEdgeSplit:
         if n_test + n_val > max_holdout:
             raise ValueError(
                 "Requested val/test split is too large to keep one train review "
-                "edge per tire."
+                "edge per item."
             )
 
         holdout_order = torch.randperm(max_holdout, generator=g).tolist()
@@ -87,20 +75,19 @@ class ReviewEdgeSplit:
             dtype=torch.long,
         )
 
-        train_data = cls._build_train_graph(data, train_idx)
         return cls(
             train_idx=train_idx,
             val_idx=val_idx,
             test_idx=test_idx,
-            train_data=train_data,
+            train_data=cls._build_train_graph(data, train_idx),
         )
 
     @staticmethod
     def _build_train_graph(data: HeteroData, train_idx: torch.Tensor) -> HeteroData:
         train_data = copy.deepcopy(data)
 
-        fw_edge = ("user", "reviews", "tire")
-        rv_edge = ("tire", "rev_by", "user")
+        fw_edge = ("user", "reviews", "item")
+        rv_edge = ("item", "rev_by", "user")
         fw_store = train_data[fw_edge]
         idx = train_idx.to(fw_store.edge_index.device)
 
@@ -127,19 +114,19 @@ class BPRSampler:
         test_ratio: float = 0.1,
         seed: int = 0,
     ) -> None:
-        edge_index = data["user", "reviews", "tire"].edge_index
+        edge_index = data["user", "reviews", "item"].edge_index
         all_users = edge_index[0]
-        all_tires = edge_index[1]
-        edge_attr = getattr(data["user", "reviews", "tire"], "edge_attr", None)
+        all_items = edge_index[1]
+        edge_attr = getattr(data["user", "reviews", "item"], "edge_attr", None)
 
         if edge_attr is None or rating_threshold is None:
             raise ValueError(
                 "BPRSampler needs edge ratings (edge_attr) and a rating_threshold"
-                " — bad reviews must be distinguishable from good ones."
+                " so liked and disliked reviews are distinguishable."
             )
 
         self.num_users = data["user"].num_nodes
-        self.num_tires = data["tire"].num_nodes
+        self.num_items = data["item"].num_nodes
         self.split = ReviewEdgeSplit.from_data(
             data,
             val_ratio=val_ratio,
@@ -155,13 +142,13 @@ class BPRSampler:
         test_idx = self.split.test_idx.to(idx_device)
 
         train_users_all = all_users.index_select(0, train_idx)
-        train_tires_all = all_tires.index_select(0, train_idx)
+        train_items_all = all_items.index_select(0, train_idx)
         train_ratings_all = ratings.index_select(0, train_idx)
         val_users_all = all_users.index_select(0, val_idx)
-        val_tires_all = all_tires.index_select(0, val_idx)
+        val_items_all = all_items.index_select(0, val_idx)
         val_ratings_all = ratings.index_select(0, val_idx)
         test_users_all = all_users.index_select(0, test_idx)
-        test_tires_all = all_tires.index_select(0, test_idx)
+        test_items_all = all_items.index_select(0, test_idx)
         test_ratings_all = ratings.index_select(0, test_idx)
 
         train_good_mask = train_ratings_all >= rating_threshold
@@ -170,36 +157,27 @@ class BPRSampler:
         test_good_mask = test_ratings_all >= rating_threshold
 
         users = train_users_all[train_good_mask]
-        tires = train_tires_all[train_good_mask]
+        items = train_items_all[train_good_mask]
         bad_users = train_users_all[train_bad_mask]
-        bad_tires = train_tires_all[train_bad_mask]
+        bad_items = train_items_all[train_bad_mask]
 
-        # Per-user reviewed items on the train split. BPR negatives must
-        # avoid all of them, not just the train positives.
         self.user_reviewed_train: list[set[int]] = [
             set() for _ in range(self.num_users)
         ]
-        for u, t in zip(train_users_all.tolist(), train_tires_all.tolist()):
-            self.user_reviewed_train[u].add(t)
+        for u, item in zip(train_users_all.tolist(), train_items_all.tolist()):
+            self.user_reviewed_train[u].add(item)
 
-        # Per-user positives on the train split — used for BPR positives
-        # and as train-time ground truth for evaluation masking.
         self.user_positives: list[set[int]] = [set() for _ in range(self.num_users)]
-        for u, t in zip(users.tolist(), tires.tolist()):
-            self.user_positives[u].add(t)
+        for u, item in zip(users.tolist(), items.tolist()):
+            self.user_positives[u].add(item)
 
-        # Per-user disliked tires — used for contrastive sampling.
         self.user_disliked: list[list[int]] = [[] for _ in range(self.num_users)]
-        for u, t in zip(bad_users.tolist(), bad_tires.tolist()):
-            self.user_disliked[u].append(t)
+        for u, item in zip(bad_users.tolist(), bad_items.tolist()):
+            self.user_disliked[u].append(item)
 
-        # Per-user positives as a list (for fast random.choice during contrast).
         self.user_positives_list: list[list[int]] = [
             list(s) for s in self.user_positives
         ]
-
-        # Pool of users who have BOTH ≥1 good and ≥1 bad review — only
-        # these can produce a contrastive triplet.
         self.contrast_users: torch.Tensor = torch.tensor(
             [
                 u
@@ -210,61 +188,75 @@ class BPRSampler:
         )
 
         self.train_users = users
-        self.train_tires = tires
+        self.train_items = items
+        self.train_observed_users = train_users_all
+        self.train_observed_items = train_items_all
+        self.train_observed_labels = train_good_mask.float()
         self.val_users = val_users_all[val_good_mask]
-        self.val_tires = val_tires_all[val_good_mask]
+        self.val_items = val_items_all[val_good_mask]
+        self.val_observed_users = val_users_all
+        self.val_observed_items = val_items_all
+        self.val_observed_labels = val_good_mask.float()
         self.test_users = test_users_all[test_good_mask]
-        self.test_tires = test_tires_all[test_good_mask]
+        self.test_items = test_items_all[test_good_mask]
+        self.test_observed_users = test_users_all
+        self.test_observed_items = test_items_all
+        self.test_observed_labels = test_good_mask.float()
 
         self._gen = torch.Generator().manual_seed(seed + 1)
 
-    # ──────────────────────────────────────────────────────────────────
     def sample(
         self, batch_size: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Draw one mini-batch of BPR (user, positive, negative) triplets."""
         n = self.train_users.size(0)
         idx = torch.randint(0, n, (batch_size,), generator=self._gen)
-        u = self.train_users[idx]
-        pos = self.train_tires[idx]
+        users = self.train_users[idx]
+        pos = self.train_items[idx]
 
-        neg = torch.randint(0, self.num_tires, (batch_size,), generator=self._gen)
+        neg = torch.randint(0, self.num_items, (batch_size,), generator=self._gen)
         for i in range(batch_size):
-            ui = int(u[i])
-            seen = self.user_reviewed_train[ui]
+            user_idx = int(users[i])
+            seen = self.user_reviewed_train[user_idx]
             while int(neg[i]) in seen:
                 neg[i] = int(
-                    torch.randint(0, self.num_tires, (1,), generator=self._gen).item()
+                    torch.randint(0, self.num_items, (1,), generator=self._gen).item()
                 )
 
-        return u, pos, neg
+        return users, pos, neg
 
-    # ──────────────────────────────────────────────────────────────────
+    def sample_observed(
+        self, batch_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Draw observed train reviews with binary liked/disliked labels."""
+        n = self.train_observed_users.size(0)
+        idx = torch.randint(0, n, (batch_size,), generator=self._gen)
+        return (
+            self.train_observed_users[idx],
+            self.train_observed_items[idx],
+            self.train_observed_labels[idx],
+        )
+
     def sample_contrast(
         self, batch_size: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        """
-        Draw a mini-batch of contrastive (user, t_good, t_disliked) triplets.
-
-        Returns ``None`` if no users in the dataset have both a good and a
-        disliked review (the loss term must then be skipped).
-        """
+        """Draw contrastive (user, liked_item, disliked_item) triplets."""
         pool = self.contrast_users
         if pool.numel() == 0:
             return None
 
         idx = torch.randint(0, pool.numel(), (batch_size,), generator=self._gen)
-        u = pool[idx]
+        users = pool[idx]
 
         good = torch.empty(batch_size, dtype=torch.long)
         bad = torch.empty(batch_size, dtype=torch.long)
         for i in range(batch_size):
-            ui = int(u[i])
-            goods = self.user_positives_list[ui]
-            bads = self.user_disliked[ui]
+            user_idx = int(users[i])
+            goods = self.user_positives_list[user_idx]
+            bads = self.user_disliked[user_idx]
             gi = int(torch.randint(0, len(goods), (1,), generator=self._gen).item())
             bi = int(torch.randint(0, len(bads), (1,), generator=self._gen).item())
             good[i] = goods[gi]
             bad[i] = bads[bi]
 
-        return u, good, bad
+        return users, good, bad

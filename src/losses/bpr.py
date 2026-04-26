@@ -1,7 +1,7 @@
 """
 Bayesian Personalized Ranking (BPR) pairwise loss.
 
-For each (user, positive_tire, negative_tire) triplet, push the
+For each (user, positive_item, negative_item) triplet, push the
 positive's score above the negative's:
 
     L = -mean(log σ(s(u, t+) - s(u, t-)))

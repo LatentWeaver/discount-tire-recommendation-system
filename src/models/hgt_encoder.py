@@ -1,5 +1,5 @@
 """
-HGT encoder for the tire recommendation graph.
+HGT encoder for heterogeneous recommendation graphs.
 
 Wraps per-node-type input projections + stacked ``HGTLayer`` blocks to
 produce contextualised embeddings for every node type in the graph.
