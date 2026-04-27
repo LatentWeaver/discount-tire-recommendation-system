@@ -165,8 +165,8 @@ class HGTPretrainer:
     @torch.no_grad()
     def review_metrics(self, split: str = "val") -> dict[str, float]:
         self.model.eval()
-        out = self.model.encode(self.train_data)
-        device = out["h_user_t"].device
+        device = self.device or next(self.model.parameters()).device
+        out = self.model.encode(self.train_data.clone().to(device))
 
         if split == "val":
             users = self.sampler.val_observed_users

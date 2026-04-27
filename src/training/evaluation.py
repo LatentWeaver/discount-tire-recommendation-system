@@ -25,9 +25,9 @@ def evaluate(
     batch_size: int = 256,
 ) -> dict[str, float]:
     model.eval()
-    out = model.encode(data)
+    device = next(model.parameters()).device
+    out = model.encode(data.clone().to(device))
     num_items = out["h_item_t"].size(0)
-    device = out["h_item_t"].device
     topk_max = min(max(ks), num_items)
 
     sums = {f"Recall@{k}": 0.0 for k in ks}
