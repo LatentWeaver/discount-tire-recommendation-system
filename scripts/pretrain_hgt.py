@@ -255,7 +255,8 @@ def main() -> None:
     torch.save(
         {
             "model_state_dict": model.state_dict(),
-            "graph_path": str(graph_path),
+            "graph_path": args.graph_path,
+            "graph_path_resolved": str(graph_path),
             "config": vars(args),
             "best_epoch": best_epoch,
             "best_val_recall_at_20": best_val,

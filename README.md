@@ -81,6 +81,7 @@ uv run python tests/test_hgt_recommender.py
 ```bash
 uv run python scripts/evaluate_hgt.py \
   --checkpoint outputs/checkpoints/hgt_movielens_pretrained.pt \
+  --graph-path data/processed/movielens_1m_hetero_graph.pt \
   --split val \
   --max-eval-examples 1000 \
   --sample-eval-examples

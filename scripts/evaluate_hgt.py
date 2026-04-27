@@ -66,6 +66,32 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def resolve_existing_path(path_value: object, fallback: str | None = None) -> Path:
+    candidates: list[Path] = []
+    if path_value:
+        path = Path(str(path_value))
+        candidates.append(path if path.is_absolute() else PROJECT_ROOT / path)
+        candidates.append(PROJECT_ROOT / path.name)
+        if len(path.parts) >= 2:
+            candidates.append(PROJECT_ROOT / path.parts[-2] / path.name)
+        if len(path.parts) >= 3:
+            candidates.append(PROJECT_ROOT / path.parts[-3] / path.parts[-2] / path.name)
+    if fallback:
+        candidates.append(PROJECT_ROOT / fallback)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists():
+            return candidate
+
+    checked = "\n  ".join(str(p) for p in seen)
+    raise FileNotFoundError(f"Could not find path. Checked:\n  {checked}")
+
+
 def model_from_checkpoint(data, checkpoint: dict[str, object]) -> HGTRecommender:
     config = checkpoint.get("config", {})
     assert isinstance(config, dict)
@@ -249,17 +275,15 @@ def score_chunk(
 
 def main() -> None:
     args = parse_args()
-    checkpoint_path = (PROJECT_ROOT / args.checkpoint).resolve()
+    checkpoint_path = resolve_existing_path(args.checkpoint)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     config = checkpoint.get("config", {})
     assert isinstance(config, dict)
 
-    graph_path = args.graph_path or checkpoint.get("graph_path") or config.get("graph_path")
-    if graph_path is None:
-        raise ValueError("No graph path found. Pass --graph-path.")
-    graph_path = Path(graph_path)
-    if not graph_path.is_absolute():
-        graph_path = PROJECT_ROOT / graph_path
+    graph_path = resolve_existing_path(
+        args.graph_path or checkpoint.get("graph_path") or config.get("graph_path"),
+        fallback="data/processed/movielens_1m_hetero_graph.pt",
+    )
 
     payload = torch.load(graph_path, weights_only=False)
     data = payload["graph"]
