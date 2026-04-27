@@ -55,8 +55,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--graph-path",
         type=str,
-        default="data/processed/movielens_1m_hetero_graph.pt",
-        help="Graph payload produced by scripts/build_movielens_graph.py.",
+        default="data/processed/lastfm_hetero_graph.pt",
+        help="Graph payload produced by scripts/build_lastfm_graph.py.",
     )
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--steps-per-epoch", type=int, default=200)

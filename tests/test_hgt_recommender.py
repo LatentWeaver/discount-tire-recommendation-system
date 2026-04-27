@@ -22,7 +22,7 @@ from src.models import HGTRecommender
 
 
 def main() -> None:
-    graph_path = PROJECT_ROOT / "data" / "processed" / "movielens_hetero_graph.pt"
+    graph_path = PROJECT_ROOT / "data" / "processed" / "lastfm_hetero_graph.pt"
     data = torch.load(graph_path, weights_only=False)["graph"]
 
     model = HGTRecommender.from_data(

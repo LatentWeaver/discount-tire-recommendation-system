@@ -1,20 +1,20 @@
 # HGT Recommendation Benchmark
 
-Heterogeneous Graph Transformer recommendation benchmark using MovieLens.
+Heterogeneous Graph Transformer recommendation benchmark focused on LastFM.
 
 The active graph schema is:
 
 ```text
-user  --reviews-->  item
-item  --rev_by-->   user
-user  --rates_low/mid/high--> item
-item  --rated_low/mid/high_by--> user
-item  --has_genre--> genre
-genre --genre_of--> item
+user  --reviews--> item(artist)
+item  --rev_by-->  user
+user  --follows--> user
+item  --has_tag--> tag
+tag   --tag_of-->  item
 ```
 
-Training combines BPR ranking with an observed-review liked/disliked
-classification head.
+Training uses mini-batch heterogeneous subgraph sampling. On CUDA, install
+`pyg-lib` to enable PyG's compiled `LinkNeighborLoader`; otherwise
+`--sampler-backend auto` falls back to the portable Python sampler.
 
 ## Setup
 
@@ -22,56 +22,36 @@ classification head.
 uv sync
 ```
 
-## Build MovieLens Graph
+## Build LastFM Graph
 
 ```bash
-uv run python scripts/build_movielens_graph.py
+uv run python scripts/build_lastfm_graph.py
 ```
 
 This creates:
 
 ```text
-data/processed/movielens_hetero_graph.pt
+data/processed/lastfm_hetero_graph.pt
 ```
 
-To train on MovieLens 1M instead:
-
-```bash
-uv run python scripts/build_movielens_graph.py --dataset 1m
-```
-
-This creates:
-
-```text
-data/processed/movielens_1m_hetero_graph.pt
-```
-
-## Pretrain HGT
+## Train HGT
 
 ```bash
 uv run python scripts/pretrain_hgt.py \
-  --graph-path data/processed/movielens_1m_hetero_graph.pt \
+  --graph-path data/processed/lastfm_hetero_graph.pt \
   --epochs 20 \
   --steps-per-epoch 200 \
   --training-mode subgraph \
   --sampler-backend auto \
-  --batch-size 256 \
+  --batch-size 1024 \
+  --hidden-dim 64 \
   --fanout 8 \
-  --max-nodes-per-type 4096 \
-  --save-path outputs/checkpoints/hgt_movielens_pretrained.pt
+  --save-path outputs/checkpoints/hgt_lastfm.pt
 ```
 
-`subgraph` training samples a typed multi-hop heterogeneous neighborhood for
-each interaction batch, so MovieLens 1M does not require full-graph HGT
-encoding during training. Set `--eval-every N` only when you explicitly want
-full-graph validation; the default `0` skips it to avoid MPS memory pressure.
-On CUDA, install `pyg-lib` to enable PyG's compiled `LinkNeighborLoader`;
-otherwise `--sampler-backend auto` falls back to the portable Python sampler.
-
-Metrics reported:
-
-- `Recall@K`, `NDCG@K`, `HitRate@K` for top-K ranking.
-- `ReviewBalancedAcc`, `ReviewPosAcc`, `ReviewNegAcc` for liked/disliked prediction.
+Use `--sampler-backend pyg-link --device cuda` on a CUDA machine with `pyg-lib`
+installed. LastFM is implicit feedback, so focus on `Recall@K`, `NDCG@K`, and
+`HitRate@K`; review classification metrics are not meaningful for this graph.
 
 ## Smoke Test
 
@@ -83,8 +63,8 @@ uv run python tests/test_hgt_recommender.py
 
 ```bash
 uv run python scripts/evaluate_hgt.py \
-  --checkpoint outputs/checkpoints/hgt_movielens_pretrained.pt \
-  --graph-path data/processed/movielens_1m_hetero_graph.pt \
+  --checkpoint outputs/checkpoints/hgt_lastfm.pt \
+  --graph-path data/processed/lastfm_hetero_graph.pt \
   --split val \
   --max-eval-examples 1000 \
   --sample-eval-examples

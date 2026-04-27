@@ -98,13 +98,10 @@ class HGTPretrainer:
         labels = edge_store.edge_label.float()
         logits = self.model.score(out, edge_label_index[0], edge_label_index[1])
 
-        link_weights = torch.where(
-            labels > 0.5,
-            torch.full_like(labels, self.review_pos_weight),
-            torch.full_like(labels, self.review_neg_weight),
-        )
-        loss_link = F.binary_cross_entropy_with_logits(
-            logits, labels, weight=link_weights
+        loss_link = self._grouped_bpr_loss(
+            logits=logits,
+            users=edge_label_index[0],
+            labels=labels,
         )
 
         loss_link.backward()
@@ -115,6 +112,31 @@ class HGTPretrainer:
             "L_bpr": float(loss_link.item()),
             "L_review": 0.0,
         }
+
+    @staticmethod
+    def _grouped_bpr_loss(
+        logits: torch.Tensor,
+        users: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        pos_mask = labels > 0.5
+        neg_mask = ~pos_mask
+        pos_scores = logits[pos_mask]
+        pos_users = users[pos_mask]
+        neg_scores = logits[neg_mask]
+        neg_users = users[neg_mask]
+
+        losses: list[torch.Tensor] = []
+        for user, pos_score in zip(pos_users.tolist(), pos_scores):
+            user_neg_scores = neg_scores[neg_users == user]
+            if user_neg_scores.numel() == 0:
+                user_neg_scores = neg_scores
+            if user_neg_scores.numel() > 0:
+                losses.append(-F.logsigmoid(pos_score - user_neg_scores).mean())
+
+        if losses:
+            return torch.stack(losses).mean()
+        return F.binary_cross_entropy_with_logits(logits, labels)
 
     def _train_subgraph_step(self, batch_size: int = 1024) -> dict[str, float]:
         self.model.train()

@@ -282,7 +282,7 @@ def main() -> None:
 
     graph_path = resolve_existing_path(
         args.graph_path or checkpoint.get("graph_path") or config.get("graph_path"),
-        fallback="data/processed/movielens_1m_hetero_graph.pt",
+        fallback="data/processed/lastfm_hetero_graph.pt",
     )
 
     payload = torch.load(graph_path, weights_only=False)

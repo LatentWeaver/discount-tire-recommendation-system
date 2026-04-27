@@ -13,6 +13,7 @@ from collections.abc import Iterator
 import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import LinkNeighborLoader
+from torch_geometric.sampler import NegativeSampling
 
 from src.training.sampler import BPRSampler
 
@@ -22,14 +23,14 @@ def has_compiled_neighbor_sampler() -> bool:
         import pyg_lib  # noqa: F401
 
         return True
-    except ModuleNotFoundError:
+    except (ModuleNotFoundError, OSError):
         pass
 
     try:
         import torch_sparse  # noqa: F401
 
         return True
-    except ModuleNotFoundError:
+    except (ModuleNotFoundError, OSError):
         return False
 
 
@@ -70,7 +71,7 @@ class PyGLinkNeighborBatcher:
             num_neighbors=num_neighbors,
             edge_label_index=(("user", "reviews", "item"), edge_label_index),
             edge_label=edge_label,
-            neg_sampling_ratio=neg_sampling_ratio,
+            neg_sampling=NegativeSampling("binary", amount=neg_sampling_ratio),
             batch_size=batch_size,
             shuffle=True,
             num_workers=num_workers,
