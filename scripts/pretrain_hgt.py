@@ -31,6 +31,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.models.hgt_recommender import HGTRecommender
 from src.training.hgt_pretrainer import HGTPretrainer
+from src.training.pyg_link_sampler import (
+    PyGLinkNeighborBatcher,
+    has_compiled_neighbor_sampler,
+)
 from src.training.sampler import BPRSampler
 from src.training.subgraph_sampler import HGTSubgraphSampler
 
@@ -63,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         default="subgraph",
         help="Use HGT-style mini-batch subgraph sampling or full-graph training.",
     )
+    p.add_argument(
+        "--sampler-backend",
+        choices=("auto", "pyg-link", "python"),
+        default="auto",
+        help="Subgraph sampler backend. auto uses PyG compiled link sampling on CUDA when available.",
+    )
     p.add_argument("--num-neighbor-hops", type=int, default=2)
     p.add_argument(
         "--fanout",
@@ -76,6 +86,8 @@ def parse_args() -> argparse.Namespace:
         default=4096,
         help="Maximum nodes retained per node type in sampled subgraphs. <=0 disables the cap.",
     )
+    p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument("--neg-sampling-ratio", type=float, default=1.0)
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--hidden-dim", type=int, default=128)
@@ -141,6 +153,30 @@ def main() -> None:
         rating_threshold=args.rating_threshold,
         seed=args.seed,
     )
+    use_pyg_link = (
+        args.training_mode == "subgraph"
+        and args.sampler_backend in {"auto", "pyg-link"}
+        and device.type == "cuda"
+        and has_compiled_neighbor_sampler()
+    )
+    if args.sampler_backend == "pyg-link" and not use_pyg_link:
+        raise RuntimeError(
+            "--sampler-backend pyg-link requires CUDA plus pyg-lib or torch-sparse. "
+            "Install pyg-lib on the remote CUDA machine, or use --sampler-backend python."
+        )
+
+    pyg_link_batcher = (
+        PyGLinkNeighborBatcher(
+            sampler=sampler,
+            batch_size=args.batch_size,
+            num_hops=args.num_neighbor_hops,
+            fanout=args.fanout,
+            neg_sampling_ratio=args.neg_sampling_ratio,
+            num_workers=args.num_workers,
+        )
+        if use_pyg_link
+        else None
+    )
     subgraph_sampler = (
         HGTSubgraphSampler(
             sampler=sampler,
@@ -149,7 +185,7 @@ def main() -> None:
             max_nodes_per_type=args.max_nodes_per_type,
             seed=args.seed + 7,
         )
-        if args.training_mode == "subgraph"
+        if args.training_mode == "subgraph" and pyg_link_batcher is None
         else None
     )
     optimizer = torch.optim.Adam(
@@ -161,6 +197,7 @@ def main() -> None:
         optimizer=optimizer,
         review_loss_weight=args.review_loss_weight,
         subgraph_sampler=subgraph_sampler,
+        pyg_link_batcher=pyg_link_batcher,
         device=device,
     )
 
@@ -173,8 +210,14 @@ def main() -> None:
     if args.training_mode == "subgraph":
         print(
             f"Subgraph sampling: hops={args.num_neighbor_hops} "
-            f"fanout={args.fanout} max_nodes_per_type={args.max_nodes_per_type}"
+            f"fanout={args.fanout} max_nodes_per_type={args.max_nodes_per_type} "
+            f"backend={'pyg-link' if pyg_link_batcher is not None else 'python'}"
         )
+        if pyg_link_batcher is None and device.type == "cuda":
+            print(
+                "Warning: using Python sampler on CUDA. Install pyg-lib for faster "
+                "compiled sampling, then run with --sampler-backend pyg-link."
+            )
     print(
         f"Train positives: {sampler.train_users.size(0):,} | "
         f"Observed train reviews: {sampler.train_observed_users.size(0):,} | "

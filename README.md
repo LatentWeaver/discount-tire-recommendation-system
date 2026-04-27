@@ -54,6 +54,7 @@ uv run python scripts/pretrain_hgt.py \
   --epochs 20 \
   --steps-per-epoch 200 \
   --training-mode subgraph \
+  --sampler-backend auto \
   --batch-size 256 \
   --fanout 8 \
   --max-nodes-per-type 4096 \
@@ -64,6 +65,8 @@ uv run python scripts/pretrain_hgt.py \
 each interaction batch, so MovieLens 1M does not require full-graph HGT
 encoding during training. Set `--eval-every N` only when you explicitly want
 full-graph validation; the default `0` skips it to avoid MPS memory pressure.
+On CUDA, install `pyg-lib` to enable PyG's compiled `LinkNeighborLoader`;
+otherwise `--sampler-backend auto` falls back to the portable Python sampler.
 
 Metrics reported:
 

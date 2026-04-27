@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from src.losses.bpr import bpr_loss
 from src.models.hgt_recommender import HGTRecommender
 from src.training.evaluation import evaluate as _evaluate
+from src.training.pyg_link_sampler import PyGLinkNeighborBatcher
 from src.training.sampler import BPRSampler
 from src.training.subgraph_sampler import HGTSubgraphSampler
 
@@ -29,6 +30,7 @@ class HGTPretrainer:
         optimizer: torch.optim.Optimizer,
         review_loss_weight: float = 0.5,
         subgraph_sampler: HGTSubgraphSampler | None = None,
+        pyg_link_batcher: PyGLinkNeighborBatcher | None = None,
         device: torch.device | None = None,
     ) -> None:
         self.model = model
@@ -37,6 +39,7 @@ class HGTPretrainer:
         self.optimizer = optimizer
         self.review_loss_weight = review_loss_weight
         self.subgraph_sampler = subgraph_sampler
+        self.pyg_link_batcher = pyg_link_batcher
         self.device = device
         pos_rate = float(sampler.train_observed_labels.mean().item())
         neg_rate = 1.0 - pos_rate
@@ -44,6 +47,8 @@ class HGTPretrainer:
         self.review_neg_weight = 0.5 / max(neg_rate, 1e-6)
 
     def train_step(self, batch_size: int = 1024) -> dict[str, float]:
+        if self.pyg_link_batcher is not None:
+            return self._train_pyg_link_step()
         if self.subgraph_sampler is not None:
             return self._train_subgraph_step(batch_size)
 
@@ -78,6 +83,37 @@ class HGTPretrainer:
             "loss": float(loss.item()),
             "L_bpr": float(loss_bpr.item()),
             "L_review": float(loss_review.item()),
+        }
+
+    def _train_pyg_link_step(self) -> dict[str, float]:
+        self.model.train()
+        self.optimizer.zero_grad()
+
+        device = self.device or next(self.model.parameters()).device
+        batch_data = self.pyg_link_batcher.sample().to(device)
+        out = self.model.encode(batch_data)
+
+        edge_store = batch_data["user", "reviews", "item"]
+        edge_label_index = edge_store.edge_label_index
+        labels = edge_store.edge_label.float()
+        logits = self.model.score(out, edge_label_index[0], edge_label_index[1])
+
+        link_weights = torch.where(
+            labels > 0.5,
+            torch.full_like(labels, self.review_pos_weight),
+            torch.full_like(labels, self.review_neg_weight),
+        )
+        loss_link = F.binary_cross_entropy_with_logits(
+            logits, labels, weight=link_weights
+        )
+
+        loss_link.backward()
+        self.optimizer.step()
+
+        return {
+            "loss": float(loss_link.item()),
+            "L_bpr": float(loss_link.item()),
+            "L_review": 0.0,
         }
 
     def _train_subgraph_step(self, batch_size: int = 1024) -> dict[str, float]:
