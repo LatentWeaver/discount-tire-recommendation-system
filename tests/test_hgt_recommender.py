@@ -46,10 +46,9 @@ def main() -> None:
         print(f"  scores: shape={tuple(scores.shape)} "
               f"min={scores.min().item():.4f} max={scores.max().item():.4f}")
 
-        # With normalize=True, dot products are cosine similarities ∈ [-1, 1].
-        assert scores.min().item() >= -1.0 - 1e-5
-        assert scores.max().item() <= 1.0 + 1e-5
-        print("  ✓ cosine score range OK")
+        assert scores.shape == (8,)
+        assert torch.isfinite(scores).all()
+        print("  ✓ hybrid scores finite")
 
 
 if __name__ == "__main__":

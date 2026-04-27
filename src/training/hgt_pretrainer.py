@@ -18,6 +18,7 @@ from src.losses.bpr import bpr_loss
 from src.models.hgt_recommender import HGTRecommender
 from src.training.evaluation import evaluate as _evaluate
 from src.training.sampler import BPRSampler
+from src.training.subgraph_sampler import HGTSubgraphSampler
 
 
 class HGTPretrainer:
@@ -27,18 +28,25 @@ class HGTPretrainer:
         sampler: BPRSampler,
         optimizer: torch.optim.Optimizer,
         review_loss_weight: float = 0.5,
+        subgraph_sampler: HGTSubgraphSampler | None = None,
+        device: torch.device | None = None,
     ) -> None:
         self.model = model
         self.train_data = sampler.train_data
         self.sampler = sampler
         self.optimizer = optimizer
         self.review_loss_weight = review_loss_weight
+        self.subgraph_sampler = subgraph_sampler
+        self.device = device
         pos_rate = float(sampler.train_observed_labels.mean().item())
         neg_rate = 1.0 - pos_rate
         self.review_pos_weight = 0.5 / max(pos_rate, 1e-6)
         self.review_neg_weight = 0.5 / max(neg_rate, 1e-6)
 
     def train_step(self, batch_size: int = 1024) -> dict[str, float]:
+        if self.subgraph_sampler is not None:
+            return self._train_subgraph_step(batch_size)
+
         self.model.train()
         self.optimizer.zero_grad()
 
@@ -53,6 +61,52 @@ class HGTPretrainer:
         obs_u, obs_item, obs_y = self.sampler.sample_observed(batch_size)
         logits = self.model.review_logit(out, obs_u.to(device), obs_item.to(device))
         labels = obs_y.to(device)
+        review_weights = torch.where(
+            labels > 0.5,
+            torch.full_like(labels, self.review_pos_weight),
+            torch.full_like(labels, self.review_neg_weight),
+        )
+        loss_review = F.binary_cross_entropy_with_logits(
+            logits, labels, weight=review_weights
+        )
+
+        loss = loss_bpr + self.review_loss_weight * loss_review
+        loss.backward()
+        self.optimizer.step()
+
+        return {
+            "loss": float(loss.item()),
+            "L_bpr": float(loss_bpr.item()),
+            "L_review": float(loss_review.item()),
+        }
+
+    def _train_subgraph_step(self, batch_size: int = 1024) -> dict[str, float]:
+        self.model.train()
+        self.optimizer.zero_grad()
+
+        batch = self.subgraph_sampler.sample(batch_size)
+        device = self.device or next(self.model.parameters()).device
+        batch_data = batch.data.to(device)
+        out = self.model.encode(batch_data)
+
+        score_pos = self.model.score(
+            out,
+            batch.users.to(device),
+            batch.pos_items.to(device),
+        )
+        score_neg = self.model.score(
+            out,
+            batch.users.to(device),
+            batch.neg_items.to(device),
+        )
+        loss_bpr = bpr_loss(score_pos, score_neg)
+
+        logits = self.model.review_logit(
+            out,
+            batch.observed_users.to(device),
+            batch.observed_items.to(device),
+        )
+        labels = batch.observed_labels.to(device)
         review_weights = torch.where(
             labels > 0.5,
             torch.full_like(labels, self.review_pos_weight),

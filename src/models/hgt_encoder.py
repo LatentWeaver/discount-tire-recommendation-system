@@ -28,10 +28,16 @@ class HGTEncoder(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.2,
         use_norm: bool = True,
+        aggregate_layers: str = "mean",
         in_dim_dict: dict[str, int] | None = None,
         num_nodes_dict: dict[str, int] | None = None,
     ) -> None:
         super().__init__()
+        if aggregate_layers not in {"last", "mean"}:
+            raise ValueError(
+                "aggregate_layers must be either 'last' or 'mean', "
+                f"got {aggregate_layers!r}"
+            )
         node_types, edge_types = metadata
 
         in_dim_dict = in_dim_dict or {}
@@ -40,6 +46,7 @@ class HGTEncoder(nn.Module):
         self.hidden_dim = hidden_dim
         self.node_types = list(node_types)
         self.edge_types = list(edge_types)
+        self.aggregate_layers = aggregate_layers
 
         self.input_proj = nn.ModuleDict()
         self.input_emb = nn.ModuleDict()
@@ -77,6 +84,7 @@ class HGTEncoder(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.2,
         use_norm: bool = True,
+        aggregate_layers: str = "mean",
     ) -> "HGTEncoder":
         """Build an encoder configured to match a ``HeteroData`` instance."""
         in_dim_dict: dict[str, int] = {}
@@ -95,6 +103,7 @@ class HGTEncoder(nn.Module):
             num_heads=num_heads,
             dropout=dropout,
             use_norm=use_norm,
+            aggregate_layers=aggregate_layers,
             in_dim_dict=in_dim_dict,
             num_nodes_dict=num_nodes_dict,
         )
@@ -116,7 +125,16 @@ class HGTEncoder(nn.Module):
 
     def forward(self, data: HeteroData) -> dict[str, torch.Tensor]:
         h_dict = self._initial_embeddings(data)
+        layer_outputs = [h_dict]
         edge_index_dict = data.edge_index_dict
         for layer in self.layers:
             h_dict = layer(h_dict, edge_index_dict)
-        return h_dict
+            layer_outputs.append(h_dict)
+
+        if self.aggregate_layers == "last":
+            return h_dict
+
+        return {
+            nt: torch.stack([h[nt] for h in layer_outputs], dim=0).mean(dim=0)
+            for nt in h_dict
+        }

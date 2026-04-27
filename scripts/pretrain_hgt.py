@@ -32,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.models.hgt_recommender import HGTRecommender
 from src.training.hgt_pretrainer import HGTPretrainer
 from src.training.sampler import BPRSampler
+from src.training.subgraph_sampler import HGTSubgraphSampler
 
 
 def pick_device(preferred: str | None) -> torch.device:
@@ -50,18 +51,43 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--graph-path",
         type=str,
-        default="data/processed/movielens_hetero_graph.pt",
+        default="data/processed/movielens_1m_hetero_graph.pt",
         help="Graph payload produced by scripts/build_movielens_graph.py.",
     )
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--steps-per-epoch", type=int, default=200)
-    p.add_argument("--batch-size", type=int, default=2048)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--weight-decay", type=float, default=1e-3)
-    p.add_argument("--hidden-dim", type=int, default=64)
+    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument(
+        "--training-mode",
+        choices=("subgraph", "full"),
+        default="subgraph",
+        help="Use HGT-style mini-batch subgraph sampling or full-graph training.",
+    )
+    p.add_argument("--num-neighbor-hops", type=int, default=2)
+    p.add_argument(
+        "--fanout",
+        type=int,
+        default=8,
+        help="Maximum sampled incident neighbors per node, relation, and hop. <=0 keeps all.",
+    )
+    p.add_argument(
+        "--max-nodes-per-type",
+        type=int,
+        default=4096,
+        help="Maximum nodes retained per node type in sampled subgraphs. <=0 disables the cap.",
+    )
+    p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument("--weight-decay", type=float, default=1e-4)
+    p.add_argument("--hidden-dim", type=int, default=128)
     p.add_argument("--num-layers", type=int, default=2)
     p.add_argument("--num-heads", type=int, default=4)
-    p.add_argument("--dropout", type=float, default=0.3)
+    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument(
+        "--aggregate-layers",
+        choices=("mean", "last"),
+        default="mean",
+        help="Use LightGCN-style mean pooling over input/layer embeddings or last layer only.",
+    )
     p.add_argument("--temperature", type=float, default=20.0)
     p.add_argument("--rating-threshold", type=float, default=4.0)
     p.add_argument(
@@ -70,7 +96,12 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Weight for observed liked/disliked review classification loss.",
     )
-    p.add_argument("--eval-every", type=int, default=1)
+    p.add_argument(
+        "--eval-every",
+        type=int,
+        default=0,
+        help="Run full-graph validation every N epochs. 0 disables full-graph eval.",
+    )
     p.add_argument(
         "--save-path",
         type=str,
@@ -91,23 +122,35 @@ def main() -> None:
     data = payload["graph"]
 
     device = pick_device(args.device)
-    data = data.to(device)
+    train_data_for_model = data.to(device) if args.training_mode == "full" else data
 
     model = HGTRecommender.from_data(
-        data,
+        train_data_for_model,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         dropout=args.dropout,
+        aggregate_layers=args.aggregate_layers,
         normalize=True,
         temperature=args.temperature,
         use_review_head=True,
     ).to(device)
 
     sampler = BPRSampler(
-        data,
+        train_data_for_model,
         rating_threshold=args.rating_threshold,
         seed=args.seed,
+    )
+    subgraph_sampler = (
+        HGTSubgraphSampler(
+            sampler=sampler,
+            num_hops=args.num_neighbor_hops,
+            fanout=args.fanout,
+            max_nodes_per_type=args.max_nodes_per_type,
+            seed=args.seed + 7,
+        )
+        if args.training_mode == "subgraph"
+        else None
     )
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -117,11 +160,21 @@ def main() -> None:
         sampler=sampler,
         optimizer=optimizer,
         review_loss_weight=args.review_loss_weight,
+        subgraph_sampler=subgraph_sampler,
+        device=device,
     )
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Graph: {graph_path}")
-    print(f"Device: {device} | Params: {n_params:,}")
+    print(
+        f"Device: {device} | Params: {n_params:,} | "
+        f"Training: {args.training_mode}"
+    )
+    if args.training_mode == "subgraph":
+        print(
+            f"Subgraph sampling: hops={args.num_neighbor_hops} "
+            f"fanout={args.fanout} max_nodes_per_type={args.max_nodes_per_type}"
+        )
     print(
         f"Train positives: {sampler.train_users.size(0):,} | "
         f"Observed train reviews: {sampler.train_observed_users.size(0):,} | "
@@ -162,7 +215,9 @@ def main() -> None:
             f"review={agg['L_review']:.4f}"
         )
 
-        if epoch % args.eval_every == 0 or epoch == args.epochs:
+        if args.eval_every > 0 and (
+            epoch % args.eval_every == 0 or epoch == args.epochs
+        ):
             metrics = trainer.evaluate(split="val", ks=(10, 20, 50))
             review_metrics = trainer.review_metrics(split="val")
             msg += (
@@ -182,15 +237,18 @@ def main() -> None:
 
     if best_state is not None:
         model.load_state_dict(best_state)
+        print(f"\nRestored best pretrain checkpoint from epoch {best_epoch}")
 
-    print(f"\nRestored best pretrain checkpoint from epoch {best_epoch}")
-    print("Final test metrics:")
-    test_metrics = trainer.evaluate(split="test", ks=(10, 20, 50))
-    test_review_metrics = trainer.review_metrics(split="test")
-    for k, v in test_metrics.items():
-        print(f"  {k:<14s} {v:.4f}")
-    for k, v in test_review_metrics.items():
-        print(f"  {k:<18s} {v:.4f}")
+    if args.eval_every > 0:
+        print("Final test metrics:")
+        test_metrics = trainer.evaluate(split="test", ks=(10, 20, 50))
+        test_review_metrics = trainer.review_metrics(split="test")
+        for k, v in test_metrics.items():
+            print(f"  {k:<14s} {v:.4f}")
+        for k, v in test_review_metrics.items():
+            print(f"  {k:<18s} {v:.4f}")
+    else:
+        print("\nSkipped full-graph validation/test metrics (--eval-every 0).")
 
     save_path = (PROJECT_ROOT / args.save_path).resolve()
     save_path.parent.mkdir(parents=True, exist_ok=True)

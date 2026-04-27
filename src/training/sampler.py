@@ -4,6 +4,7 @@ BPR + contrastive triplet sampler for user-item review graphs.
 Expected graph schema:
     user --reviews--> item
     item --rev_by--> user
+    optional rating-bucket review edges carrying ``review_edge_id``
 """
 
 from __future__ import annotations
@@ -86,21 +87,46 @@ class ReviewEdgeSplit:
     def _build_train_graph(data: HeteroData, train_idx: torch.Tensor) -> HeteroData:
         train_data = copy.deepcopy(data)
 
-        fw_edge = ("user", "reviews", "item")
-        rv_edge = ("item", "rev_by", "user")
-        fw_store = train_data[fw_edge]
-        idx = train_idx.to(fw_store.edge_index.device)
+        has_review_ids = any(
+            getattr(train_data[edge_type], "review_edge_id", None) is not None
+            for edge_type in train_data.edge_types
+        )
+        if not has_review_ids:
+            fw_edge = ("user", "reviews", "item")
+            rv_edge = ("item", "rev_by", "user")
+            fw_store = train_data[fw_edge]
+            idx = train_idx.to(fw_store.edge_index.device)
 
-        fw_store.edge_index = fw_store.edge_index.index_select(1, idx)
-        if getattr(fw_store, "edge_attr", None) is not None:
-            fw_store.edge_attr = fw_store.edge_attr.index_select(0, idx)
+            fw_store.edge_index = fw_store.edge_index.index_select(1, idx)
+            if getattr(fw_store, "edge_attr", None) is not None:
+                fw_store.edge_attr = fw_store.edge_attr.index_select(0, idx)
 
-        if rv_edge in train_data.edge_types:
-            rv_store = train_data[rv_edge]
-            rv_idx = train_idx.to(rv_store.edge_index.device)
-            rv_store.edge_index = rv_store.edge_index.index_select(1, rv_idx)
-            if getattr(rv_store, "edge_attr", None) is not None:
-                rv_store.edge_attr = rv_store.edge_attr.index_select(0, rv_idx)
+            if rv_edge in train_data.edge_types:
+                rv_store = train_data[rv_edge]
+                rv_idx = train_idx.to(rv_store.edge_index.device)
+                rv_store.edge_index = rv_store.edge_index.index_select(1, rv_idx)
+                if getattr(rv_store, "edge_attr", None) is not None:
+                    rv_store.edge_attr = rv_store.edge_attr.index_select(0, rv_idx)
+
+            return train_data
+
+        train_ids = set(train_idx.detach().cpu().tolist())
+        for edge_type in train_data.edge_types:
+            store = train_data[edge_type]
+            review_edge_id = getattr(store, "review_edge_id", None)
+            if review_edge_id is None:
+                continue
+
+            keep = torch.tensor(
+                [int(edge_id) in train_ids for edge_id in review_edge_id.cpu()],
+                dtype=torch.bool,
+                device=review_edge_id.device,
+            )
+            keep_idx = keep.nonzero().view(-1)
+            store.edge_index = store.edge_index.index_select(1, keep_idx)
+            if getattr(store, "edge_attr", None) is not None:
+                store.edge_attr = store.edge_attr.index_select(0, keep_idx)
+            store.review_edge_id = review_edge_id.index_select(0, keep_idx)
 
         return train_data
 
