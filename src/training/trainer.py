@@ -32,6 +32,7 @@ from src.losses.bpr import bpr_loss
 from src.models.two_tower import TwoTowerRecommender
 from src.training.augment import augment_view, info_nce
 from src.training.evaluation import evaluate as _evaluate
+from src.training.hard_negatives import build_buckets, sample_hard_negatives
 from src.training.sampler import BPRSampler
 
 
@@ -71,6 +72,7 @@ class TwoTowerTrainer:
         ssl_tau: float = 0.5,
         ssl_sample_size: int = 1024,
         history_drop: float = 0.0,
+        hard_neg_k: int = 0,
         seed: int = 0,
     ) -> None:
         if loss not in {"softmax", "bpr", "bce"}:
@@ -92,6 +94,8 @@ class TwoTowerTrainer:
         self.ssl_tau = float(ssl_tau)
         self.ssl_sample_size = int(ssl_sample_size)
         self.history_drop = float(history_drop)
+        self.hard_neg_k = int(hard_neg_k)
+        self._neg_gen = torch.Generator(device=device.type if device.type != "mps" else "cpu").manual_seed(seed + 11)
         # Separate generator for SSL aug so it doesn't perturb sampler RNG.
         self._ssl_gen = (
             torch.Generator(device=device.type if device.type != "mps" else "cpu")
@@ -124,6 +128,15 @@ class TwoTowerTrainer:
             )
         self.hist_count = counts.clamp(min=1.0).unsqueeze(-1)
         self.hist_mask = (counts > 0)
+
+        # Hard-negative buckets (brand ∪ size). Built lazily so off-by-default
+        # users don't pay the cost.
+        if self.hard_neg_k > 0:
+            self.bucket_offsets, self.bucket_indices = build_buckets(
+                self.tire_brand_idx, self.tire_size_idx
+            )
+        else:
+            self.bucket_offsets = self.bucket_indices = None
 
     # ──────────────────────────────────────────────────────────────────
     def _autocast(self):
@@ -230,7 +243,20 @@ class TwoTowerTrainer:
                 pos = pos.to(self.device, non_blocking=True)
                 user_vec = cache["user_vec"][u]
                 pos_vec = cache["item_vec"][pos]
-                logits = user_vec @ pos_vec.t() / self.model.temperature
+                temp = self.model.temperature
+                logits = user_vec @ pos_vec.t() / temp                # (B, B)
+
+                if self.hard_neg_k > 0:
+                    hard = sample_hard_negatives(
+                        pos, self.hard_neg_k,
+                        self.bucket_offsets, self.bucket_indices,
+                        num_tires=cache["item_vec"].size(0),
+                        generator=self._neg_gen,
+                    )                                                  # (B, k_hard)
+                    hard_vec = cache["item_vec"][hard]                 # (B, k_hard, d)
+                    hard_logits = (user_vec.unsqueeze(1) * hard_vec).sum(-1) / temp
+                    logits = torch.cat([logits, hard_logits], dim=-1)  # (B, B + k_hard)
+
                 target = torch.arange(u.size(0), device=self.device)
                 loss_main = F.cross_entropy(logits, target)
             elif self.loss == "bpr":
@@ -238,6 +264,12 @@ class TwoTowerTrainer:
                 u = u.to(self.device, non_blocking=True)
                 pos = pos.to(self.device, non_blocking=True)
                 neg = neg.to(self.device, non_blocking=True)
+                if self.hard_neg_k > 0:
+                    hard = sample_hard_negatives(
+                        pos, 1, self.bucket_offsets, self.bucket_indices,
+                        num_tires=cache["item_vec"].size(0), generator=self._neg_gen,
+                    ).squeeze(-1)
+                    neg = hard
                 loss_main = bpr_loss(
                     self.model.score(cache, u, pos),
                     self.model.score(cache, u, neg),
@@ -247,6 +279,12 @@ class TwoTowerTrainer:
                 u = u.to(self.device, non_blocking=True)
                 pos = pos.to(self.device, non_blocking=True)
                 neg = neg.to(self.device, non_blocking=True)
+                if self.hard_neg_k > 0:
+                    hard = sample_hard_negatives(
+                        pos, 1, self.bucket_offsets, self.bucket_indices,
+                        num_tires=cache["item_vec"].size(0), generator=self._neg_gen,
+                    ).squeeze(-1)
+                    neg = hard
                 score_pos = self.model.score(cache, u, pos)
                 score_neg = self.model.score(cache, u, neg)
                 scores = torch.cat([score_pos, score_neg])
