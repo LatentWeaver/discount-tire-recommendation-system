@@ -28,9 +28,9 @@ from pathlib import Path
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
-import faiss
 import numpy as np
 import torch
+import faiss  # must follow torch — see scripts/inference.py for context
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -68,6 +68,7 @@ def main() -> None:
     payload = torch.load(graph_path, weights_only=False)
     data = payload["graph"].to(device)
     mappings = payload["mappings"]
+    review_df = payload.get("review_df")
 
     ckpt_path = Path(args.checkpoint)
     if not ckpt_path.is_absolute():
@@ -80,6 +81,7 @@ def main() -> None:
         data,
         rating_threshold=train_args["rating_threshold"],
         seed=split_seed,
+        review_df=review_df,
     )
     train_data = sampler.train_data
 
