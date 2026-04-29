@@ -79,6 +79,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ssl-tau", type=float, default=0.5)
     p.add_argument("--ssl-sample-size", type=int, default=1024,
                    help="Subset of users + tires used per InfoNCE step.")
+    # History-pool dropout (Tier-1 augmentation E).
+    p.add_argument("--history-drop", type=float, default=0.0,
+                   help="Probability of dropping each (user, train-positive) pair "
+                        "before mean-pooling. 0 disables. Try 0.3.")
     p.add_argument("--rating-threshold", type=float, default=4.0)
     p.add_argument("--eval-every", type=int, default=1)
     p.add_argument("--best-metric", type=str, default="Recall@20")
@@ -133,6 +137,7 @@ def main() -> None:
         ssl_feat_drop=args.ssl_feat_drop,
         ssl_tau=args.ssl_tau,
         ssl_sample_size=args.ssl_sample_size,
+        history_drop=args.history_drop,
         seed=args.seed,
     )
 
@@ -140,9 +145,10 @@ def main() -> None:
     amp_tag = " amp(bf16)" if trainer.amp else ""
     text_tag = " +text" if model.uses_text else ""
     ssl_tag = f" +ssl(λ={args.ssl_lambda})" if args.ssl_lambda > 0 else ""
+    hdrop_tag = f" +hdrop({args.history_drop})" if args.history_drop > 0 else ""
     print(
         f"Device: {device}{amp_tag} | Params: {n_params:,} | "
-        f"Loss: {args.loss}{text_tag}{ssl_tag}"
+        f"Loss: {args.loss}{text_tag}{ssl_tag}{hdrop_tag}"
     )
     print(
         f"Train: {sampler.train_users.size(0):,} | "

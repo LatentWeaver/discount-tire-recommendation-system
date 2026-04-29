@@ -70,6 +70,7 @@ class TwoTowerTrainer:
         ssl_feat_drop: float = 0.1,
         ssl_tau: float = 0.5,
         ssl_sample_size: int = 1024,
+        history_drop: float = 0.0,
         seed: int = 0,
     ) -> None:
         if loss not in {"softmax", "bpr", "bce"}:
@@ -90,6 +91,7 @@ class TwoTowerTrainer:
         self.ssl_feat_drop = float(ssl_feat_drop)
         self.ssl_tau = float(ssl_tau)
         self.ssl_sample_size = int(ssl_sample_size)
+        self.history_drop = float(history_drop)
         # Separate generator for SSL aug so it doesn't perturb sampler RNG.
         self._ssl_gen = (
             torch.Generator(device=device.type if device.type != "mps" else "cpu")
@@ -130,15 +132,38 @@ class TwoTowerTrainer:
         return nullcontext()
 
     def _pool_history_gpu(self, item_vec: torch.Tensor) -> torch.Tensor:
+        """Mean-pool train-positive item vectors per user (vectorised on GPU).
+
+        When ``history_drop > 0`` and the model is in train mode, a fresh
+        Bernoulli mask drops a fraction of (user, tire) pairs *before*
+        pooling — counts are recomputed on the fly so the mean stays
+        unbiased. Users that lose all of their history this step are
+        treated like cold-start users (zero pool), which is exactly the
+        regularisation we want for an eval-time empty-history regime.
+        """
         n_users = self.sampler.num_users
         d = item_vec.size(-1)
         out = item_vec.new_zeros((n_users, d))
         if self.hist_user_idx.numel() == 0:
             return out
-        contrib = item_vec.index_select(0, self.hist_tire_idx)
+
+        contrib = item_vec.index_select(0, self.hist_tire_idx)  # (M, d)
+
+        if self.history_drop > 0 and self.model.training:
+            keep = (
+                torch.rand(contrib.size(0), device=contrib.device)
+                >= self.history_drop
+            ).to(contrib.dtype)
+            contrib = contrib * keep.unsqueeze(-1)
+            kept_counts = torch.zeros(n_users, dtype=contrib.dtype, device=contrib.device)
+            kept_counts.scatter_add_(0, self.hist_user_idx, keep)
+            denom = kept_counts.clamp(min=1.0).unsqueeze(-1)
+        else:
+            denom = self.hist_count
+
         idx = self.hist_user_idx.unsqueeze(-1).expand(-1, d)
         out.scatter_add_(0, idx, contrib)
-        return out / self.hist_count
+        return out / denom
 
     def _encode_graph(self, graph: HeteroData) -> dict[str, torch.Tensor]:
         """Run encoder + towers on an arbitrary graph (train or augmented view)."""
