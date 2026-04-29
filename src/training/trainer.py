@@ -6,16 +6,17 @@ Per step:
      graph → ``user_vec``, ``item_vec``.
   2. Sample a mini-batch of positive (user, tire) pairs.
   3. Apply the chosen retrieval loss:
-     - ``softmax`` (default) — sampled-softmax over **in-batch negatives**
-       (the canonical Two-Tower objective).
+     - ``softmax`` (default) — sampled-softmax over **in-batch negatives**.
      - ``bpr``               — pairwise BPR with one random negative.
      - ``bce``               — binary cross-entropy with one random negative.
+  4. (Optional) Tier-1 augmentation A — SGL-style graph contrastive:
+     two augmented views of the train graph + InfoNCE on user/tire
+     embeddings. Activated when ``ssl_lambda > 0``.
 
-CUDA optimizations baked in:
+CUDA optimisations:
   - History pooling uses a precomputed flat (user, tire) pair tensor and
     GPU-side ``scatter_add_`` instead of a Python per-user loop.
-  - When ``loss="softmax"`` we skip the per-row negative-rejection loop in
-    the sampler entirely — in-batch negatives don't need it.
+  - ``loss="softmax"`` uses ``BPRSampler.sample_pos`` (no rejection loop).
   - Optional bf16 ``autocast`` (CUDA only) via ``amp=True``.
 """
 
@@ -29,6 +30,7 @@ from torch_geometric.data import HeteroData
 
 from src.losses.bpr import bpr_loss
 from src.models.two_tower import TwoTowerRecommender
+from src.training.augment import augment_view, info_nce
 from src.training.evaluation import evaluate as _evaluate
 from src.training.sampler import BPRSampler
 
@@ -63,6 +65,11 @@ class TwoTowerTrainer:
         optimizer: torch.optim.Optimizer,
         loss: str = "softmax",
         amp: bool = False,
+        ssl_lambda: float = 0.0,
+        ssl_edge_drop: float = 0.2,
+        ssl_feat_drop: float = 0.1,
+        ssl_tau: float = 0.5,
+        ssl_sample_size: int = 1024,
         seed: int = 0,
     ) -> None:
         if loss not in {"softmax", "bpr", "bce"}:
@@ -78,12 +85,21 @@ class TwoTowerTrainer:
         self.device = device
         self.amp = bool(amp) and device.type == "cuda"
 
+        self.ssl_lambda = float(ssl_lambda)
+        self.ssl_edge_drop = float(ssl_edge_drop)
+        self.ssl_feat_drop = float(ssl_feat_drop)
+        self.ssl_tau = float(ssl_tau)
+        self.ssl_sample_size = int(ssl_sample_size)
+        # Separate generator for SSL aug so it doesn't perturb sampler RNG.
+        self._ssl_gen = (
+            torch.Generator(device=device.type if device.type != "mps" else "cpu")
+            .manual_seed(seed + 7)
+        )
+
         # Per-tire brand/size node id (constant across training).
         self.tire_brand_idx, self.tire_size_idx = build_tire_lookup(self.train_data)
 
         # Flat (user_idx, tire_idx) pairs for vectorised history pooling.
-        # Replaces the Python ``for u in range(N_user)`` loop in
-        # TwoTowerRecommender._pool_history with a single scatter_add on GPU.
         flat_users: list[int] = []
         flat_tires: list[int] = []
         n_users = sampler.num_users
@@ -104,13 +120,8 @@ class TwoTowerTrainer:
             counts.scatter_add_(
                 0, self.hist_user_idx, torch.ones_like(self.hist_user_idx, dtype=torch.float32)
             )
-        # clamp(min=1) so cold-start users (count=0) divide cleanly; their
-        # numerator is also zero, so the pooled vector stays zero.
         self.hist_count = counts.clamp(min=1.0).unsqueeze(-1)
         self.hist_mask = (counts > 0)
-
-        # AMP scaler is only meaningful for fp16; we use bf16, which doesn't
-        # need a GradScaler. ``autocast(dtype=bf16)`` is enough.
 
     # ──────────────────────────────────────────────────────────────────
     def _autocast(self):
@@ -119,21 +130,19 @@ class TwoTowerTrainer:
         return nullcontext()
 
     def _pool_history_gpu(self, item_vec: torch.Tensor) -> torch.Tensor:
-        """Mean-pool train-positive item vectors per user, fully on device."""
         n_users = self.sampler.num_users
         d = item_vec.size(-1)
         out = item_vec.new_zeros((n_users, d))
         if self.hist_user_idx.numel() == 0:
             return out
-        contrib = item_vec.index_select(0, self.hist_tire_idx)  # (M, d)
+        contrib = item_vec.index_select(0, self.hist_tire_idx)
         idx = self.hist_user_idx.unsqueeze(-1).expand(-1, d)
         out.scatter_add_(0, idx, contrib)
         return out / self.hist_count
 
-    def _encode(self) -> dict[str, torch.Tensor]:
-        """One full forward; same semantics as the model's ``encode`` but
-        with the GPU-vectorised history pool."""
-        h_dict = self.model.encoder(self.train_data)
+    def _encode_graph(self, graph: HeteroData) -> dict[str, torch.Tensor]:
+        """Run encoder + towers on an arbitrary graph (train or augmented view)."""
+        h_dict = self.model.encoder(graph)
         h_user = h_dict["user"]
         h_tire = h_dict["tire"]
         h_brand = h_dict["brand"]
@@ -141,14 +150,46 @@ class TwoTowerTrainer:
 
         h_brand_per_tire = h_brand[self.tire_brand_idx]
         h_size_per_tire = h_size[self.tire_size_idx]
-        tire_specs = self.train_data["tire"].x
+        tire_specs = graph["tire"].x
+        text_emb = (
+            getattr(graph["tire"], "text_x", None)
+            if self.model.uses_text else None
+        )
 
         item_vec = self.model.item_tower(
-            h_tire, h_brand_per_tire, h_size_per_tire, tire_specs
+            h_tire, h_brand_per_tire, h_size_per_tire, tire_specs, text_emb
         )
         history_pool = self._pool_history_gpu(item_vec)
         user_vec = self.model.user_tower(h_user, history_pool)
         return {"user_vec": user_vec, "item_vec": item_vec}
+
+    def _ssl_loss(self) -> torch.Tensor:
+        """Two augmented views → InfoNCE on a sampled subset of users + tires."""
+        v1 = augment_view(
+            self.train_data,
+            edge_drop=self.ssl_edge_drop,
+            feat_drop=self.ssl_feat_drop,
+            generator=self._ssl_gen,
+        )
+        v2 = augment_view(
+            self.train_data,
+            edge_drop=self.ssl_edge_drop,
+            feat_drop=self.ssl_feat_drop,
+            generator=self._ssl_gen,
+        )
+        c1 = self._encode_graph(v1)
+        c2 = self._encode_graph(v2)
+
+        n_user = c1["user_vec"].size(0)
+        n_tire = c1["item_vec"].size(0)
+        ss = self.ssl_sample_size
+
+        u_idx = torch.randint(0, n_user, (min(ss, n_user),), device=self.device)
+        t_idx = torch.randint(0, n_tire, (min(ss, n_tire),), device=self.device)
+
+        loss_user = info_nce(c1["user_vec"][u_idx], c2["user_vec"][u_idx], self.ssl_tau)
+        loss_tire = info_nce(c1["item_vec"][t_idx], c2["item_vec"][t_idx], self.ssl_tau)
+        return 0.5 * (loss_user + loss_tire)
 
     # ──────────────────────────────────────────────────────────────────
     def train_step(self, batch_size: int = 512) -> dict[str, float]:
@@ -156,28 +197,26 @@ class TwoTowerTrainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         with self._autocast():
-            cache = self._encode()
+            cache = self._encode_graph(self.train_data)
 
             if self.loss == "softmax":
                 u, pos = self.sampler.sample_pos(batch_size)
                 u = u.to(self.device, non_blocking=True)
                 pos = pos.to(self.device, non_blocking=True)
-
                 user_vec = cache["user_vec"][u]
                 pos_vec = cache["item_vec"][pos]
                 logits = user_vec @ pos_vec.t() / self.model.temperature
                 target = torch.arange(u.size(0), device=self.device)
-                loss = F.cross_entropy(logits, target)
-
+                loss_main = F.cross_entropy(logits, target)
             elif self.loss == "bpr":
                 u, pos, neg = self.sampler.sample(batch_size)
                 u = u.to(self.device, non_blocking=True)
                 pos = pos.to(self.device, non_blocking=True)
                 neg = neg.to(self.device, non_blocking=True)
-                score_pos = self.model.score(cache, u, pos)
-                score_neg = self.model.score(cache, u, neg)
-                loss = bpr_loss(score_pos, score_neg)
-
+                loss_main = bpr_loss(
+                    self.model.score(cache, u, pos),
+                    self.model.score(cache, u, neg),
+                )
             else:  # bce
                 u, pos, neg = self.sampler.sample(batch_size)
                 u = u.to(self.device, non_blocking=True)
@@ -190,13 +229,21 @@ class TwoTowerTrainer:
                     torch.ones_like(score_pos),
                     torch.zeros_like(score_neg),
                 ])
-                loss = F.binary_cross_entropy_with_logits(scores, labels)
+                loss_main = F.binary_cross_entropy_with_logits(scores, labels)
+
+            loss_ssl = torch.zeros((), device=self.device)
+            if self.ssl_lambda > 0:
+                loss_ssl = self._ssl_loss()
+
+            loss = loss_main + self.ssl_lambda * loss_ssl
 
         loss.backward()
         self.optimizer.step()
 
         return {
             "loss": float(loss.detach().item()),
+            "L_main": float(loss_main.detach().item()),
+            "L_ssl": float(loss_ssl.detach().item()),
             "temp": float(self.model.temperature.item()),
         }
 
@@ -216,8 +263,7 @@ class TwoTowerTrainer:
 
         self.model.eval()
         with self._autocast():
-            cache = self._encode()
-        # eval kept in fp32 to keep top-k stable
+            cache = self._encode_graph(self.train_data)
         cache = {k: v.float() for k, v in cache.items()}
         return _evaluate(
             cache=cache,

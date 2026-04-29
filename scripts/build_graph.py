@@ -98,6 +98,28 @@ def main(config_path: str = "configs/default.yaml") -> None:
     assert not torch.isnan(data["tire"].x).any(), "NaN found in tire features"
     print("   All checks passed!")
 
+    # ── Optional: attach precomputed sentence-transformer text emb. ──
+    text_emb_path = processed_dir / "tire_text_emb.npy"
+    if text_emb_path.exists():
+        import numpy as np
+        text_emb = np.load(text_emb_path).astype(np.float32)
+        if text_emb.shape[0] != data["tire"].num_nodes:
+            raise ValueError(
+                f"Text embedding row count ({text_emb.shape[0]}) does not match"
+                f" tire node count ({data['tire'].num_nodes}). Re-run"
+                f" scripts/build_text_embeddings.py."
+            )
+        data["tire"].text_x = torch.from_numpy(text_emb)
+        print(
+            f"Attached text features to tire nodes: "
+            f"{tuple(data['tire'].text_x.shape)}"
+        )
+    else:
+        print(
+            "No precomputed text embeddings found — skipping. "
+            "Run scripts/build_text_embeddings.py to enable Tier-1 augmentation C."
+        )
+
     # ── Save ──────────────────────────────────────
     # Bundle graph + ID mappings + tire metadata so that downstream scripts
     # (train, eval, visualize) can resolve human-readable names.

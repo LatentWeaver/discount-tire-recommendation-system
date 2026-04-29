@@ -2,9 +2,13 @@
 Two-Tower retrieval model on top of the HGT encoder.
 
   HGT(graph) → h_user, h_tire, h_brand, h_size
-  ItemTower([h_tire, h_brand, h_size, structured_specs])  → item_vec
-  UserTower([h_user, mean(item_vec over user history)])   → user_vec
+  ItemTower([h_tire, h_brand, h_size, structured_specs, (text_emb)])  → item_vec
+  UserTower([h_user, mean(item_vec over user history)])                → user_vec
   score(u, t) = user_vec · item_vec    (ℓ2-normalised, dot == cosine)
+
+If ``data["tire"].text_x`` is present (a precomputed sentence-transformer
+embedding), it is fused into the item tower via a learnable projection
+(Tier-1 augmentation C in new_instructions.md).
 """
 
 from __future__ import annotations
@@ -36,8 +40,8 @@ class _MLP(nn.Module):
 
 class ItemTower(nn.Module):
     """
-    Concatenates (h_tire, h_brand_of_tire, h_size_of_tire, structured_specs)
-    and projects to ``out_dim``.
+    Concatenates (h_tire, h_brand_of_tire, h_size_of_tire, structured_specs,
+    optional text_proj) and projects to ``out_dim``.
     """
 
     def __init__(
@@ -47,19 +51,38 @@ class ItemTower(nn.Module):
         hidden: int,
         out_dim: int,
         dropout: float = 0.2,
+        text_dim: int | None = None,
+        text_proj_dim: int = 64,
     ) -> None:
         super().__init__()
-        in_dim = hgt_dim * 3 + spec_dim
+        self.text_proj: nn.Module | None
+        if text_dim is not None and text_dim > 0:
+            self.text_proj = nn.Sequential(
+                nn.Linear(text_dim, text_proj_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            )
+            in_dim = hgt_dim * 3 + spec_dim + text_proj_dim
+        else:
+            self.text_proj = None
+            in_dim = hgt_dim * 3 + spec_dim
+
         self.mlp = _MLP(in_dim, hidden, out_dim, dropout)
 
     def forward(
         self,
-        h_tire: torch.Tensor,           # (N_tire, d)
-        h_brand_per_tire: torch.Tensor, # (N_tire, d)
-        h_size_per_tire: torch.Tensor,  # (N_tire, d)
-        tire_specs: torch.Tensor,       # (N_tire, F)
+        h_tire: torch.Tensor,
+        h_brand_per_tire: torch.Tensor,
+        h_size_per_tire: torch.Tensor,
+        tire_specs: torch.Tensor,
+        text_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = torch.cat([h_tire, h_brand_per_tire, h_size_per_tire, tire_specs], dim=-1)
+        parts = [h_tire, h_brand_per_tire, h_size_per_tire, tire_specs]
+        if self.text_proj is not None:
+            if text_emb is None:
+                raise ValueError("ItemTower has a text head but no text_emb was passed.")
+            parts.append(self.text_proj(text_emb))
+        x = torch.cat(parts, dim=-1)
         return F.normalize(self.mlp(x), p=2, dim=-1)
 
 
@@ -88,10 +111,7 @@ class TwoTowerRecommender(nn.Module):
     HGT encoder shared by both towers; item & user towers project to the
     retrieval space.
 
-    A learnable temperature scales the logits for sampled-softmax. For
-    ℓ2-normalised vectors the raw dot product lives in [-1, 1], which is
-    far too peaky for a cross-entropy softmax — the temperature lets the
-    optimiser broaden the distribution.
+    A learnable temperature scales the logits for sampled-softmax.
     """
 
     def __init__(
@@ -102,10 +122,13 @@ class TwoTowerRecommender(nn.Module):
         hidden: int = 128,
         dropout: float = 0.2,
         init_temperature: float = 0.07,
+        text_dim: int | None = None,
+        text_proj_dim: int = 64,
     ) -> None:
         super().__init__()
         self.encoder = encoder
         hgt_dim = encoder.hidden_dim
+        self.uses_text = text_dim is not None and text_dim > 0
 
         self.item_tower = ItemTower(
             hgt_dim=hgt_dim,
@@ -113,6 +136,8 @@ class TwoTowerRecommender(nn.Module):
             hidden=hidden,
             out_dim=out_dim,
             dropout=dropout,
+            text_dim=text_dim,
+            text_proj_dim=text_proj_dim,
         )
         self.user_tower = UserTower(
             hgt_dim=hgt_dim,
@@ -122,8 +147,9 @@ class TwoTowerRecommender(nn.Module):
             dropout=dropout,
         )
 
-        # log-temperature stored as a parameter; clamp on use.
-        self.log_temp = nn.Parameter(torch.tensor(float(torch.log(torch.tensor(init_temperature)))))
+        self.log_temp = nn.Parameter(
+            torch.tensor(float(torch.log(torch.tensor(init_temperature))))
+        )
 
     @property
     def temperature(self) -> torch.Tensor:
@@ -140,6 +166,7 @@ class TwoTowerRecommender(nn.Module):
         out_dim: int = 64,
         dropout: float = 0.2,
         init_temperature: float = 0.07,
+        text_proj_dim: int = 64,
     ) -> "TwoTowerRecommender":
         encoder = HGTEncoder.from_data(
             data,
@@ -149,6 +176,8 @@ class TwoTowerRecommender(nn.Module):
             dropout=dropout,
         )
         spec_dim = int(data["tire"].x.size(-1))
+        text_x = getattr(data["tire"], "text_x", None)
+        text_dim = int(text_x.size(-1)) if text_x is not None else None
         return cls(
             encoder=encoder,
             spec_dim=spec_dim,
@@ -156,15 +185,17 @@ class TwoTowerRecommender(nn.Module):
             hidden=hidden_dim,
             dropout=dropout,
             init_temperature=init_temperature,
+            text_dim=text_dim,
+            text_proj_dim=text_proj_dim,
         )
 
     # ──────────────────────────────────────────────────────────
     def encode(
         self,
         data: HeteroData,
-        tire_brand_idx: torch.Tensor,   # (N_tire,) — brand node id of each tire
-        tire_size_idx: torch.Tensor,    # (N_tire,) — size  node id of each tire
-        user_history: list[list[int]],  # per-user list of train-positive tire idx
+        tire_brand_idx: torch.Tensor,
+        tire_size_idx: torch.Tensor,
+        user_history: list[list[int]],
     ) -> dict[str, torch.Tensor]:
         """One full forward over the train graph; returns cached vectors."""
         h_dict = self.encoder(data)
@@ -176,15 +207,18 @@ class TwoTowerRecommender(nn.Module):
         h_brand_per_tire = h_brand[tire_brand_idx]
         h_size_per_tire = h_size[tire_size_idx]
         tire_specs = data["tire"].x
+        text_emb = getattr(data["tire"], "text_x", None) if self.uses_text else None
 
-        item_vec = self.item_tower(h_tire, h_brand_per_tire, h_size_per_tire, tire_specs)
+        item_vec = self.item_tower(
+            h_tire, h_brand_per_tire, h_size_per_tire, tire_specs, text_emb
+        )
 
         history_pool = self._pool_history(item_vec, user_history)
         user_vec = self.user_tower(h_user, history_pool)
 
         return {
-            "user_vec": user_vec,   # (N_user, out_dim)  — ℓ2-normalised
-            "item_vec": item_vec,   # (N_tire, out_dim)  — ℓ2-normalised
+            "user_vec": user_vec,
+            "item_vec": item_vec,
         }
 
     @staticmethod
@@ -192,11 +226,6 @@ class TwoTowerRecommender(nn.Module):
         item_vec: torch.Tensor,
         user_history: list[list[int]],
     ) -> torch.Tensor:
-        """Mean-pool item vectors over each user's train-positive history.
-
-        Cold-start users (empty history) get a zero vector — the user tower
-        still receives a valid concat of (h_user, zeros).
-        """
         n_users = len(user_history)
         d = item_vec.size(-1)
         out = item_vec.new_zeros((n_users, d))
@@ -212,7 +241,6 @@ class TwoTowerRecommender(nn.Module):
         users: torch.Tensor,
         tires: torch.Tensor,
     ) -> torch.Tensor:
-        """Element-wise score for paired (user, tire) tensors."""
         u = cache["user_vec"][users]
         t = cache["item_vec"][tires]
         return (u * t).sum(dim=-1) / self.temperature

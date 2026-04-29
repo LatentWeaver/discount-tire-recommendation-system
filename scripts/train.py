@@ -71,6 +71,14 @@ def parse_args() -> argparse.Namespace:
                    choices=["softmax", "bpr", "bce"])
     p.add_argument("--amp", action="store_true",
                    help="Enable bf16 autocast on CUDA (≈1.5-2× speedup on Ampere+).")
+    # SGL-style self-supervised contrastive (Tier-1 augmentation A).
+    p.add_argument("--ssl-lambda", type=float, default=0.0,
+                   help="Weight on the SGL contrastive loss. 0 disables. Try 0.1.")
+    p.add_argument("--ssl-edge-drop", type=float, default=0.2)
+    p.add_argument("--ssl-feat-drop", type=float, default=0.1)
+    p.add_argument("--ssl-tau", type=float, default=0.5)
+    p.add_argument("--ssl-sample-size", type=int, default=1024,
+                   help="Subset of users + tires used per InfoNCE step.")
     p.add_argument("--rating-threshold", type=float, default=4.0)
     p.add_argument("--eval-every", type=int, default=1)
     p.add_argument("--best-metric", type=str, default="Recall@20")
@@ -120,12 +128,22 @@ def main() -> None:
         optimizer=optimizer,
         loss=args.loss,
         amp=args.amp,
+        ssl_lambda=args.ssl_lambda,
+        ssl_edge_drop=args.ssl_edge_drop,
+        ssl_feat_drop=args.ssl_feat_drop,
+        ssl_tau=args.ssl_tau,
+        ssl_sample_size=args.ssl_sample_size,
         seed=args.seed,
     )
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     amp_tag = " amp(bf16)" if trainer.amp else ""
-    print(f"Device: {device}{amp_tag} | Params: {n_params:,} | Loss: {args.loss}")
+    text_tag = " +text" if model.uses_text else ""
+    ssl_tag = f" +ssl(λ={args.ssl_lambda})" if args.ssl_lambda > 0 else ""
+    print(
+        f"Device: {device}{amp_tag} | Params: {n_params:,} | "
+        f"Loss: {args.loss}{text_tag}{ssl_tag}"
+    )
     print(
         f"Train: {sampler.train_users.size(0):,} | "
         f"Val: {sampler.val_users.size(0):,} | "
@@ -137,7 +155,7 @@ def main() -> None:
     best_epoch = 0
 
     for epoch in range(1, args.epochs + 1):
-        agg_loss = 0.0
+        agg = {"loss": 0.0, "L_main": 0.0, "L_ssl": 0.0}
         epoch_start = time.time()
         progress = tqdm(
             range(args.steps_per_epoch),
@@ -147,16 +165,23 @@ def main() -> None:
         )
         for _ in progress:
             stats = trainer.train_step(batch_size=args.batch_size)
-            agg_loss += stats["loss"]
+            for k in agg:
+                agg[k] += stats[k]
             progress.set_postfix(
-                loss=f"{stats['loss']:.4f}", temp=f"{stats['temp']:.3f}"
+                loss=f"{stats['loss']:.4f}",
+                main=f"{stats['L_main']:.4f}",
+                ssl=f"{stats['L_ssl']:.4f}",
+                temp=f"{stats['temp']:.3f}",
             )
-        agg_loss /= args.steps_per_epoch
+        for k in agg:
+            agg[k] /= args.steps_per_epoch
         epoch_time = time.time() - epoch_start
 
         msg = (
             f"[epoch {epoch:>3d}] time={epoch_time:.1f}s "
-            f"loss={agg_loss:.4f} "
+            f"loss={agg['loss']:.4f} "
+            f"main={agg['L_main']:.4f} "
+            f"ssl={agg['L_ssl']:.4f} "
             f"temp={float(model.temperature.item()):.3f}"
         )
 
