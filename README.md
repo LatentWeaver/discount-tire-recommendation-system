@@ -1,213 +1,231 @@
-# GNN-based Tire Recommendation System  
+# GNN-based Tire Recommendation System
 
-An advanced, GNN-based tire recommendation engine that transcends traditional collaborative filtering by deploying **Heterogeneous Graph Neural Networks (HGT)**, **Deep Embedding Clustering**, and **Contrastive Learning**. It is specifically designed to decode complex user feedback, isolate hidden complaint patterns, and deliver highly contextual, complementary product recommendations.
+A two-tower retrieval recommender for tires built on a **Heterogeneous Graph Transformer (HGT)** encoder. The system maps **vehicle models (year-make-model)** to tires using per-vehicle aggregated review signals — explicitly trading per-user personalization for the much higher density of vehicle-level interactions.
 
----
-
-## System Architecture
-
-### Heterogeneous Graph Schema
-To fully leverage **HGT**, tires are not treated as isolated points; instead, we construct a rich, interconnected network mapping out interactions and specifications.
-
-- **Node Types**:
-    - `User`: Contains user attributes (e.g., `user_id`).
-    - `Tire/Item`: Contains continuous/categorical features (e.g., `price`, `average_rating`, `UTQG`).
-    - `Brand`: Captures brand loyalties and preferences (e.g., "Michelin", "Landspider").
-    - `Size`: The most critical node for tire recommendation (e.g., "235/40R18"). Tires with the same specifications are naturally clustered through this node.
-- **Edge Types (Meta-Relations)**:
-    - `User -[reviews]-> Tire`: Review relation. The rating is stored on the edge for sampling and thresholding, while the HGT layer itself follows type-based heterogeneous attention.
-    - `Tire -[belongs_to]-> Brand`: Brand affiliation.
-    - `Tire -[has_spec]-> Size`: Specification grouping.
-
-### Feature Extraction Layer (HGT Encoder)
-The **HGT Network** addresses the graph's heterogeneity by dynamically learning the importance of different meta-relations (e.g., recognizing that "Size" often carries a higher weight than "Brand").
-- **Output:** High-dimensional Node Embeddings ($h_{user}$ and $h_{tire}$).
-- **User representation:** featureless node types, including users, are initialized through learnable node embeddings before heterogeneous message passing.
-- **Advantage:** HGT automatically uncovers deep latent associations, such as learning that "a specific sized tire is vastly more popular within a certain brand."
-
-### Intermediate Layer: Dual-Path Processing
-This is the core architectural optimization of the system. The pipeline splits into two synchronized branches:
-
-- **Path A: Deep Clustering (Intent Discovery).** Discovers latent tire profiles (e.g., "Economy/High-Mileage," "Performance/Sport," "Off-Road/All-Terrain") via an alternating DeepCluster procedure:
-    1. **Feature preprocessing.** Take $h_{tire}$ from the HGT encoder and apply **PCA → whitening → $\ell_2$-normalization** before clustering.
-    2. **k-means (every $N$ epochs).** Cluster the preprocessed embeddings with k-means to produce pseudo-labels $\hat{y}_{tire}$. $k$ is set to roughly $10\times$ the number of intended tire profiles (e.g., $k \approx 50$ for ~5 target categories).
-    3. **Classifier head (clustering MLP).** A small MLP head $g_W(h_{tire})$ is trained with cross-entropy against $\hat{y}_{tire}$. Gradients flow back through the HGT encoder, so the encoder learns embeddings that are naturally cluster-friendly.
-    4. **Trivial-solution safeguards.**
-        - **Empty-cluster reassignment.** If a cluster collapses during k-means, a non-empty centroid is copied with small Gaussian noise and the points are re-split.
-        - **Uniform sampling over pseudo-labels** (or equivalently, inverse-frequency loss weighting) to prevent all tires from collapsing into one dominant cluster.
-    - **Output (training):** soft cluster predictions $g_W(h_{tire})$ used for the auxiliary CE loss.
-    - **Output (inference):** the cluster probability distribution $C_{tire} = \mathrm{softmax}(g_W(h_{tire}))$, exposed to the Fusion MLP as an additional signal. The classifier head is **kept** at inference (rather than discarded) so the recommendation MLP gets an interpretable "intent" channel.
-
-- **Path B: Feature Transformation.** Applies non-linear transformations to $h_{user}$ and $h_{tire}$ to prepare them for dense vector matching.
-
-### Output Layer: Fusion & Ranking MLP
-This final layer is the confluence point, aggregating all information to produce a **ranking score** used for top-K recommendation.
-
-$$ s(u, t) = \text{MLP}(\underbrace{h_{user} \oplus h_{tire}}_{\text{Individual Features}} \oplus \underbrace{C_{tire}}_{\text{Cluster Group Features}}) $$
-
-The output is a raw scalar — higher means "more relevant for this user".
-#### Training Objective: BPR (Pairwise Ranking)
-Per training step, sample triplets $(u, t^+, t^-)$ where:
-- $t^+$ — a tire from the user's **train-split** positive reviews (rating $\geq 4$).
-- $t^-$ — a randomly sampled tire absent from the user's **train-split** reviews.
-
-Loss:
-
-$$ \mathcal{L}_{BPR} = -\frac{1}{|B|} \sum_{(u, t^+, t^-) \in B} \log \sigma\big(s(u, t^+) - s(u, t^-)\big) $$
-
-#### Contrastive Loss — "move users away from bad products"
-For users who have BOTH a good (rating $\geq$ threshold) AND a disliked (rating $<$ threshold) **train-split** review, sample triplets $(u, t_{\text{good}}, t_{\text{disliked}})$ where both tires are items the user personally owned in train. The loss explicitly teaches the model to rank good purchases above the user's own disappointments:
-
-$$ \mathcal{L}_{contrast} = -\frac{1}{|B|} \sum \log \sigma\big(s(u, t_{\text{good}}) - s(u, t_{\text{disliked}})\big) $$
-
-Unlike random BPR negatives, $t_{\text{disliked}}$ is a tire the user has actually rejected — the strongest available signal for the "transfer away from bad products" goal.
-
-#### Combined Objective
-
-$$ \mathcal{L}_{total} = \mathcal{L}_{BPR} + \lambda_{c} \cdot \mathcal{L}_{cluster} + \lambda_{\text{con}} \cdot \mathcal{L}_{contrast} $$
-
-Defaults: $\lambda_{c} = 0.5$, $\lambda_{\text{con}} = 0.3$. Set $\lambda_{\text{con}} = 0$ to ablate the contrastive term.
-
-#### Evaluation Metrics
-
-Validation and test pairs are held out at the review-edge level. The encoder, pseudo-label refresh, and all ranking passes run on the **train-only review graph**; held-out positives are used only as labels.
-
-- **Recall@K** — fraction of held-out positive tires recovered in the top-K predictions.
-- **NDCG@K** — rewards placing positives near the top of the ranked list.
-- **HitRate@K** — at least one relevant tire in top-K.
-
-Standard $K \in \{10, 20, 50\}$.
-
-#### Outputs
-1. **Ranking Score $s(u, t)$** — used to rank candidate tires per user; the top-K become the recommendation.
-2. **Cluster Tagging $C_{tire}$** — reused for backend analytics and user profiling (e.g., building a persona that strongly favors the "Budget" cluster).
-
-### Model Architecture
-
-![Model Architecture](src/img/Model%20Architecture.png)
----
-
-## Data Schema
-![Data Schema](src/img/Data%20Schema.png)
+> **Branch status (`two-tower-hgt`):** vehicle-as-query node, leak-free split, review-text fusion. Final metric on the held-out test split: **Recall@20 = 0.68**, **Recall@50 = 0.94**.
 
 ---
 
-## Getting Started
+## Why vehicle-as-query
 
-### 1. Data Setup
+A typical tire-review dataset is brutally sparse on the user side:
 
-Place the raw JSONL dataset in the `data/raw/` folder and create the `data/processed/` folder for output:
+| Entity | Distinct | Mean reviews/entity |
+|---|---|---|
+| user (author) | 886 | 1.24 |
+| **(make, model)** | **277** | **3.88** |
+| (make, model, year) | 755 | 1.42 |
+
+Customers buy tires once every few years, so per-user signals barely exist. A *vehicle model*, by contrast, has dozens of owners writing about the same fitment / load class / tread expectations — which is exactly the dimension that determines tire suitability. Aggregating to **(make, model)** gives ~3× the density of user-level data while keeping the recommendation question physically grounded ("what tires work well for an F-150?").
+
+Going finer than `(make, model)` (e.g. adding `year` or `trim`) collapses density below the user baseline, so we stop at model.
+
+---
+
+## Heterogeneous Graph Schema
+
+```
+   ┌─────────┐    reviews     ┌────────┐     belongs_to    ┌────────┐
+   │ vehicle ├───(rating)────▶│  tire  │──────────────────▶│ brand  │
+   │ (m, m)  │                │        │                    └────────┘
+   │  277    │                │   63   │     has_spec       ┌────────┐
+   └─────────┘                │        │──────────────────▶│  size  │
+                              └────────┘                    └────────┘
+                                                            (placeholder)
+```
+
+| Node type | Count | Features |
+|---|---|---|
+| `user` (= vehicle make+model) | 277 | learnable embedding (no x) |
+| `tire` | 63 | 9-dim aggregate: `avg_rating`, `rating_std`, `n_reviews`, 6 `sub_rating` means **(recomputed from train edges only)** + `text_x ∈ ℝ³⁸⁴` from sentence-transformer over per-tire review texts |
+| `brand` | 23 | learnable embedding |
+| `size` | 1 | placeholder (Discount Tire data has no per-review tire size) |
+
+Edge types: `(user, reviews, tire)` carries the 1-D rating; reverse meta-relations `(tire, rev_by, user)`, `(brand, has, tire)`, `(size, spec_of, tire)` are added for bidirectional message passing.
+
+The `user` slot is named for backwards-compatibility with the model code; semantically it holds `(VEHICLE_MAKE, VEHICLE_MODEL)` pairs like `("FORD", "F-150")`.
+
+---
+
+## Architecture
+
+### HGT Encoder
+
+`src/models/hgt_encoder.py` — a stack of `HGTLayer`s applies type-aware multi-head attention over each meta-relation. Featureless node types (`user`, `brand`, `size`) start from learnable embeddings; the `tire` type is initialised from the 9-dim aggregate features. After encoding, every node has a `hidden_dim` vector regardless of input feature dimensions.
+
+### Two-Tower retrieval head
+
+`src/models/two_tower.py`
+
+```
+HGT(graph) → h_user, h_tire, h_brand, h_size
+ItemTower([h_tire, h_brand_of_tire, h_size_of_tire, tire_specs, text_proj(text_x)]) → item_vec
+UserTower([h_user, mean(item_vec over user's train history)])                       → user_vec
+score(u, t) = (user_vec · item_vec) / temperature       (both ℓ2-normalised)
+```
+
+Both towers project into the same `out_dim` retrieval space. A learnable `temperature` scales the logits for sampled-softmax. The text embedding (per-tire review text) is fused only into the item tower via a small projection MLP.
+
+### Loss
+
+Default is **sampled-softmax with in-batch negatives**:
+
+$$
+\mathcal{L} = \mathrm{CE}\!\left(\frac{u_i \cdot t_j}{\tau},\ \text{target}=i\right)
+$$
+
+Optional terms (off by default):
+- `--ssl-lambda` — SGL-style InfoNCE on two augmented graph views
+- `--hard-neg-k` — additional hard negatives drawn from same-brand or same-size buckets
+- `--loss bpr | bce` — pairwise BPR or pointwise BCE alternatives
+
+---
+
+## Data leakage controls
+
+Three leakage paths were identified during the audit and explicitly closed:
+
+| # | Leak | Fix |
+|---|---|---|
+| 1 | **per-edge split** placed multiple reviews of the same `(vehicle, tire)` pair into different splits — the GNN's message-passing graph then literally contained a parallel edge to the held-out target. ~48 % of held-out pairs were affected. | `ReviewEdgeSplit.from_data` now splits at the **`(user, tire)` pair level**: all reviews of the same pair land in the same split. |
+| 2 | **Tire features** (`average_rating`, `rating_std`, sub-rating means) were aggregates over **all** reviews — including val/test — and entered the item tower via the spec concat. 76 % of tires had held-out ratings folded into their features. | `BPRSampler` accepts `review_df` and **recomputes the 9-dim feature matrix from train edges only**, overwriting `train_data['tire'].x` after the split. |
+| 3 | Eval mask | `user_reviewed_train` is built strictly from train edges; the held-out positive itself is exempted from masking. ✓ |
+
+Run `uv run python scripts/audit_leakage.py` to verify.
+
+The split also reserves at least one `(vehicle, tire)` pair per tire in train, so no tire ends up outside the message-passing graph.
+
+---
+
+## Final results
+
+Held-out test evaluation, best checkpoint (epoch 16) of `two_tower_vehicle_small_e50.pt`:
+
+| Metric | @10 | @20 | @50 |
+|---|---|---|---|
+| Recall / HitRate | 0.34 | **0.66** | **0.94** |
+| NDCG | 0.15 | 0.23 | 0.29 |
+
+Trajectory of the leak-fix sweep (Recall@20 on test):
+
+| Pipeline state | Test Recall@20 | Notes |
+|---|---|---|
+| Original user-based path | plateaued ~0.10 | extreme sparsity, loss plateau after epoch 2 |
+| Vehicle node, *with* leaks | 0.76 | inflated; ~48 % of held-out pairs were duplicated in train graph |
+| Vehicle node, leaks fixed, big model | 0.56 | best at epoch 1 = initialisation luck → immediate overfit (793k params, 870 train edges) |
+| Vehicle node, leaks fixed, small + reg | **0.68** | best at epoch 16, smooth 0.30 → 0.68 val curve |
+
+---
+
+## Repository layout
+
+```
+configs/
+  vehicle.yaml                              graph build config
+data/processed/
+  hetero_graph_vehicle.pt                   built graph + mappings + review_df
+  tire_text_emb_vehicle.npy                 per-tire review-text embeddings (63 × 384)
+outputs/checkpoints/
+  two_tower_vehicle_small_e50.pt            best model
+scripts/
+  build_graph_vehicle.py                    raw JSONs → HeteroData payload
+  build_review_text_embeddings.py           per-tire review concat → SentenceTransformer
+  train.py                                  training entry point
+  evaluate.py                               eval a checkpoint on val + test
+  inference.py                              top-K recommend (existing or new vehicle)
+  build_index.py                            FAISS index over item_vec
+  visualize_graph.py                        graph schema + degree plots
+  audit_leakage.py                          standalone leak audit
+src/
+  data_processing/
+    graph_builder.py                        generic HeteroData assembler
+    preprocessing_vehicle.py                JSON loader + train-only feature recompute
+  models/
+    hgt_layer.py / hgt_encoder.py           HGT building blocks
+    two_tower.py                            ItemTower + UserTower + Recommender
+  training/
+    sampler.py                              pair-level split + BPR/softmax sampler
+    trainer.py                              one full forward + loss step
+    evaluation.py                           Recall@K / NDCG@K / HitRate@K
+    augment.py                              SGL view augmentation
+    hard_negatives.py                       brand/size bucket sampling
+  losses/bpr.py
+tests/
+  test_hgt_forward.py
+  test_split_integrity.py
+  test_train_step.py
+```
+
+---
+
+## Getting started
+
+### 1. Environment
 
 ```bash
-mkdir -p data/raw data/processed
-```
-
-Then move or copy your dataset file into `data/raw/`:
-
-```
-data/
-├── raw/
-│   └── combined_tire_data_15k_cleaned.jsonl   # <-- put your dataset here
-└── processed/                                  # graph output will be saved here
-```
-
-### 2. Environment Setup
-
-This project uses [uv](https://docs.astral.sh/uv/) for incredibly fast dependency management. All required packages are declared in `pyproject.toml`.
-
-To create a virtual environment and automatically install all packages specified in `pyproject.toml`, run:
-
-```bash
-# Create the virtual environment (.venv) and install dependencies
 uv sync
-
-# Activate the virtual environment
-# On Windows:
-.venv\Scripts\activate
-# On macOS/Linux:
-source .venv/bin/activate
+source .venv/bin/activate    # macOS/Linux
 ```
 
-### 3. Build the Heterogeneous Graph
+### 2. Data
+
+The graph is built from per-product JSON files at `/Users/.../Discount-Tire-RGCN/data/results/` (configurable in `configs/vehicle.yaml::data.raw_dir`). Each file holds the reviews for one tire product with structured `vehicle_year` / `vehicle_make` / `vehicle_model` / `overall_rating` / `sub_ratings` / `review` fields.
+
+### 3. Build pipeline
 
 ```bash
-uv run python scripts/build_graph.py
+# 1. Encode per-tire review text → 384-D vectors
+uv run python scripts/build_review_text_embeddings.py
+
+# 2. Build the heterogeneous graph (auto-attaches text_x if step 1 ran)
+uv run python scripts/build_graph_vehicle.py
 ```
 
-This reads the JSONL data, constructs the PyG `HeteroData` graph, runs sanity checks, and saves the result to `data/processed/hetero_graph.pt`.
+Output: `data/processed/hetero_graph_vehicle.pt` (graph + mappings + review_df + tire_df).
 
-### 4. Visualize the Graph
+### 4. Train
 
-```bash
-uv run python scripts/visualize_graph.py
-```
-
-Generates four figures in `outputs/figures/`:
-- `graph_schema.png` -- node and edge type overview
-- `subgraph_sample.png` -- sampled neighbourhood around a few users
-- `degree_distributions.png` -- edge degree histograms per node type
-- `tire_feature_distributions.png` -- distribution of each tire feature
-
-### 5. Train the Recommender
-
-```bash
-uv run python scripts/train.py
-```
-
-Runs the full pipeline `HGT encoder → IntermediateLayer (Path A + B) → FusionMLP` with the joint objective $\mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster}$ on a **train-only review graph**.
-
-Each epoch:
-1. **Edge split**: review edges are partitioned once into `train / val / test`; the train partition becomes the encoder graph, while val/test edges are retained only as held-out labels.
-2. **Pseudo-label refresh** (every `--refresh-every` epochs): one train-graph forward → snapshot `h_tire` → PCA → whiten → ℓ2-norm → k-means → empty-cluster repair → frozen labels for the next $N$ epochs.
-3. **Training steps**: per step the BPR sampler draws train-only $(u, t^+, t^-)$ triplets, the model scores both, and the optimizer minimizes $\mathcal{L}_{BPR} + \lambda \cdot \mathcal{L}_{cluster} + \lambda_{\text{con}} \cdot \mathcal{L}_{contrast}$.
-4. **Eval** (every `--eval-every` epochs): Recall@K / NDCG@K / HitRate@K on held-out val edges, scored with embeddings from the train-only graph and with train positives masked out.
-
-Common knobs:
+The smaller-model + regularised configuration that produced the final result:
 
 ```bash
 uv run python scripts/train.py \
-  --epochs 30 --batch-size 2048 --lr 5e-4 \
-  --num-clusters 50 --cluster-lambda 0.5 \
-  --refresh-every 2 --rating-threshold 4.0
+  --graph-path data/processed/hetero_graph_vehicle.pt \
+  --epochs 50 --steps-per-epoch 100 --batch-size 256 \
+  --hidden-dim 64 --out-dim 32 --num-layers 1 --num-heads 4 \
+  --dropout 0.4 --lr 5e-4 --weight-decay 5e-4 \
+  --history-drop 0.3 \
+  --save-path outputs/checkpoints/two_tower_vehicle_small.pt
 ```
 
-The script prints per-epoch losses (`L_bpr`, `L_cluster`) and final test-set top-K metrics.
+The trainer:
+1. Splits review edges at the `(user, tire)` pair level, keeps the train subgraph for message passing, and recomputes `tire.x` from train rows only.
+2. Per step: one full HGT forward → ItemTower / UserTower → sampled-softmax over in-batch negatives.
+3. Per epoch: Recall@K / NDCG@K / HitRate@K on the val split; tracks best checkpoint by `--best-metric`.
+4. Restores the best weights at the end.
 
-### Smoke Tests
+### 5. Evaluate / inspect / verify
 
 ```bash
-uv run python tests/test_hgt_forward.py        # HGT encoder forward
-uv run python tests/test_intermediate_layer.py # Intermediate layer + DeepCluster refresh
-uv run python tests/test_train_step.py         # End-to-end: 1 refresh + 3 train steps + mini eval
+uv run python scripts/evaluate.py \
+  --checkpoint outputs/checkpoints/two_tower_vehicle_small_e50.pt
+uv run python scripts/audit_leakage.py
+uv run python scripts/visualize_graph.py
 ```
 
-### 6. Recommend (Cold-Start Graph Inference)
+### 6. Smoke tests
 
 ```bash
-# Existing user (by index):
-uv run python scripts/inference.py --user 42 --k 10
-
-# New user with structured preferences:
-uv run python scripts/inference.py --user new \
-  --brand "Michelin,Continental" \
-  --size "235/40R18" \
-  --budget-min 100 --budget-max 250 \
-  --min-treadwear 400 \
-  --traction A --temperature A \
-  --k 10
+uv run python tests/test_hgt_forward.py
+uv run python tests/test_split_integrity.py
+uv run python tests/test_train_step.py
 ```
 
-For **new users**, the script uses the same graph encoder as training:
-1. Finds tires matching the preference filters (AND logic).
-2. Injects a temporary user node into the train graph with preference edges to matching tires.
-3. Initializes that node from the mean of existing user embeddings, then runs the full HGT → Intermediate → FusionMLP pipeline on the augmented graph.
-4. Returns top-K scored tires with names and cluster IDs.
+---
 
-| Filter | Flag | Example |
-|--------|------|---------|
-| Brand | `--brand` | `"Michelin,Continental"` |
-| Size | `--size` | `"235/40R18"` |
-| Budget | `--budget-min/max` | `100`, `250` |
-| Treadwear | `--min-treadwear` | `400` |
-| Traction | `--traction` | `A` (grades: AA > A > B > C) |
-| Temperature | `--temperature` | `A` (grades: A > B > C) |
+## Key design decisions
+
+- **Vehicle replaces user, not augments it.** Per-user signals are too sparse to be useful at this dataset size; aggregating to `(make, model)` is the highest-density entity that still meaningfully constrains tire choice.
+- **`sub_ratings` are stored on the per-review DataFrame**, not consumed yet. The 6-dim feedback (tread_life / wet / cornering / noise / comfort / dry) is available for future multi-task heads but the current model only uses overall rating.
+- **Per-tire size is a placeholder.** The Discount-Tire dataset records a tire *model line* (e.g. "BFGoodrich KO2"), which ships in many sizes. A single placeholder `size` node preserves the schema without inventing data.
+- **Capacity matters more than depth on this scale.** 870 train edges + 793k params = immediate overfit. The smaller model (159k params) learns over 16 epochs and beats the bigger one by 12 percentage points on Recall@20.
+- **All architecture stayed identical** through the data-side rewrite. The model code (`hgt_encoder.py`, `two_tower.py`, `trainer.py`) was not modified during the vehicle pivot — only the data layer (`preprocessing_vehicle.py`, sampler split logic, and per-tire feature recompute).

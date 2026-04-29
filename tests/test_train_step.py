@@ -29,10 +29,16 @@ from src.training.trainer import TwoTowerTrainer
 def main() -> None:
     torch.manual_seed(0)
 
-    graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph.pt"
-    data = torch.load(graph_path, weights_only=False)["graph"]
+    graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph_vehicle.pt"
+    payload = torch.load(graph_path, weights_only=False)
+    data = payload["graph"]
 
-    sampler = BPRSampler(data, rating_threshold=4.0, seed=0)
+    sampler = BPRSampler(
+        data,
+        rating_threshold=4.0,
+        seed=0,
+        review_df=payload.get("review_df"),
+    )
     print(
         f"Splits — train: {sampler.train_users.size(0):,}, "
         f"val: {sampler.val_users.size(0):,}, "

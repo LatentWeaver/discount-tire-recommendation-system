@@ -31,9 +31,15 @@ from torch_geometric.data import HeteroData
 class ReviewEdgeSplit:
     """Canonical train / val / test split over review edges.
 
-    The split reserves at least one review edge per tire in train before
-    assigning the remaining review edges to validation/test. This avoids
-    placing a tire entirely outside the train interaction graph.
+    Splits at the **(user, tire) pair** level, not the individual review-edge
+    level: when the same user has rated the same tire multiple times, all
+    those edges are kept together in the same split. This prevents the
+    "weak generalization" leak where the encoder's message-passing graph
+    contains a parallel edge to a held-out (user, tire) — which lets the
+    GNN trivially memorise the answer.
+
+    The split also reserves at least one (user, tire) pair per tire in
+    train, so no tire ends up outside the train interaction graph.
     """
 
     train_idx: torch.Tensor
@@ -51,41 +57,60 @@ class ReviewEdgeSplit:
     ) -> "ReviewEdgeSplit":
         edge_index = data["user", "reviews", "tire"].edge_index
         n = edge_index.size(1)
+        users = edge_index[0].tolist()
         tires = edge_index[1].tolist()
 
+        # Group edges by (user, tire) pair — these become the atomic split units.
+        pair_to_edges: dict[tuple[int, int], list[int]] = {}
+        for edge_idx, (u, t) in enumerate(zip(users, tires)):
+            pair_to_edges.setdefault((u, t), []).append(edge_idx)
+        pairs = list(pair_to_edges.keys())
+        n_pairs = len(pairs)
+
+        # Bucket pairs by tire so we can reserve one pair per tire for train.
+        tire_to_pairs: dict[int, list[tuple[int, int]]] = {}
+        for p in pairs:
+            tire_to_pairs.setdefault(p[1], []).append(p)
+
         g = torch.Generator().manual_seed(seed)
-        n_test = int(n * test_ratio)
-        n_val = int(n * val_ratio)
-        tire_to_edges: dict[int, list[int]] = {}
-        for edge_idx, tire_idx in enumerate(tires):
-            tire_to_edges.setdefault(tire_idx, []).append(edge_idx)
 
-        reserved_train: list[int] = []
-        candidate_holdout: list[int] = []
-        for edge_ids in tire_to_edges.values():
-            order = torch.randperm(len(edge_ids), generator=g).tolist()
-            keep_train = edge_ids[order[0]]
-            reserved_train.append(keep_train)
-            candidate_holdout.extend(edge_ids[i] for i in order[1:])
+        reserved_train_pairs: list[tuple[int, int]] = []
+        holdout_pool: list[tuple[int, int]] = []
+        for tire_pairs in tire_to_pairs.values():
+            order = torch.randperm(len(tire_pairs), generator=g).tolist()
+            reserved_train_pairs.append(tire_pairs[order[0]])
+            holdout_pool.extend(tire_pairs[i] for i in order[1:])
 
-        max_holdout = len(candidate_holdout)
-        if n_test + n_val > max_holdout:
+        n_test_pairs = int(n_pairs * test_ratio)
+        n_val_pairs = int(n_pairs * val_ratio)
+        if n_test_pairs + n_val_pairs > len(holdout_pool):
             raise ValueError(
-                "Requested val/test split is too large to keep one train review "
-                "edge per tire."
+                "Requested val/test ratio leaves no holdout — too few (user,tire) "
+                "pairs once one is reserved per tire for train."
             )
 
-        holdout_order = torch.randperm(max_holdout, generator=g).tolist()
-        shuffled_holdout = [candidate_holdout[i] for i in holdout_order]
+        order = torch.randperm(len(holdout_pool), generator=g).tolist()
+        shuffled = [holdout_pool[i] for i in order]
+        test_pairs = shuffled[:n_test_pairs]
+        val_pairs = shuffled[n_test_pairs : n_test_pairs + n_val_pairs]
+        train_pairs = reserved_train_pairs + shuffled[n_test_pairs + n_val_pairs :]
 
-        test_idx = torch.tensor(shuffled_holdout[:n_test], dtype=torch.long)
-        val_idx = torch.tensor(
-            shuffled_holdout[n_test : n_test + n_val], dtype=torch.long
-        )
-        train_idx = torch.tensor(
-            reserved_train + shuffled_holdout[n_test + n_val :],
-            dtype=torch.long,
-        )
+        def _flatten(plist: list[tuple[int, int]]) -> list[int]:
+            out: list[int] = []
+            for p in plist:
+                out.extend(pair_to_edges[p])
+            return out
+
+        train_idx = torch.tensor(_flatten(train_pairs), dtype=torch.long)
+        val_idx = torch.tensor(_flatten(val_pairs), dtype=torch.long)
+        test_idx = torch.tensor(_flatten(test_pairs), dtype=torch.long)
+
+        # Sanity: every original edge is assigned exactly once.
+        assigned = train_idx.numel() + val_idx.numel() + test_idx.numel()
+        if assigned != n:
+            raise RuntimeError(
+                f"Pair-level split produced {assigned} edges but graph has {n}."
+            )
 
         train_data = cls._build_train_graph(data, train_idx)
         return cls(
@@ -126,6 +151,7 @@ class BPRSampler:
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         seed: int = 0,
+        review_df=None,
     ) -> None:
         edge_index = data["user", "reviews", "tire"].edge_index
         all_users = edge_index[0]
@@ -147,6 +173,32 @@ class BPRSampler:
             seed=seed,
         )
         self.train_data = self.split.train_data
+
+        # Close the tire-feature aggregate leak: overwrite data['tire'].x with
+        # per-tire aggregates recomputed from train edges only. Triggered when
+        # the caller passes the per-review DataFrame (vehicle pipeline does;
+        # legacy user-based path can't, so it's optional).
+        if review_df is not None:
+            from src.data_processing.preprocessing_vehicle import (
+                recompute_tire_features_from_train,
+            )
+            full_edge_index = data["user", "reviews", "tire"].edge_index
+            edge_tire_idx = full_edge_index[1].cpu().numpy()
+            train_row_idx = self.split.train_idx.cpu().numpy()
+            new_x = recompute_tire_features_from_train(
+                review_df=review_df,
+                edge_tire_idx=edge_tire_idx,
+                train_row_idx=train_row_idx,
+                n_tires=self.num_tires,
+            )
+            new_x_t = torch.from_numpy(new_x).to(self.train_data["tire"].x.device)
+            if new_x_t.shape != self.train_data["tire"].x.shape:
+                raise ValueError(
+                    "Recomputed tire features shape "
+                    f"{tuple(new_x_t.shape)} does not match graph spec_dim "
+                    f"{tuple(self.train_data['tire'].x.shape)}."
+                )
+            self.train_data["tire"].x = new_x_t
 
         ratings = edge_attr.squeeze(-1)
         idx_device = all_users.device

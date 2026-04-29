@@ -9,9 +9,9 @@ Per step:
      - ``softmax`` (default) — sampled-softmax over **in-batch negatives**.
      - ``bpr``               — pairwise BPR with one random negative.
      - ``bce``               — binary cross-entropy with one random negative.
-  4. (Optional) Tier-1 augmentation A — SGL-style graph contrastive:
-     two augmented views of the train graph + InfoNCE on user/tire
-     embeddings. Activated when ``ssl_lambda > 0``.
+  4. (Optional) SGL-style graph contrastive: two augmented views of the
+     train graph + InfoNCE on user/tire embeddings. Activated when
+     ``ssl_lambda > 0``.
 
 CUDA optimisations:
   - History pooling uses a precomputed flat (user, tire) pair tensor and

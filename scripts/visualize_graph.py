@@ -11,7 +11,7 @@ Generates several plots:
 Usage
 -----
     uv run python scripts/visualize_graph.py
-    uv run python scripts/visualize_graph.py --graph data/processed/hetero_graph.pt
+    uv run python scripts/visualize_graph.py --graph data/processed/hetero_graph_vehicle.pt
 """
 
 from __future__ import annotations
@@ -257,7 +257,7 @@ def plot_tire_features(data, save_path: Path) -> None:
     plt.close(fig)
 
 
-def main(graph_path: str = "data/processed/hetero_graph.pt") -> None:
+def main(graph_path: str = "data/processed/hetero_graph_vehicle.pt") -> None:
     full_path = PROJECT_ROOT / graph_path
     print(f"Loading graph from {full_path} ...")
     loaded = torch.load(full_path, weights_only=False)
@@ -278,7 +278,7 @@ def main(graph_path: str = "data/processed/hetero_graph.pt") -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize the heterogeneous tire graph")
     parser.add_argument(
-        "--graph", default="data/processed/hetero_graph.pt",
+        "--graph", default="data/processed/hetero_graph_vehicle.pt",
         help="Path to the saved HeteroData .pt file",
     )
     args = parser.parse_args()

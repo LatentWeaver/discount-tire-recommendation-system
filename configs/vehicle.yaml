@@ -1,0 +1,11 @@
+# Config for the vehicle-as-query graph build
+# (vehicle (make,model) replaces user as the query node-type slot)
+
+data:
+  raw_dir: "/Users/chenchaoshiang/CIPS_LAB/Discount-Tire-RGCN/data/results"
+  processed_dir: "data/processed"
+  graph_filename: "hetero_graph_vehicle.pt"
+
+graph:
+  add_reverse_edges: true
+  use_rating_as_edge_weight: true

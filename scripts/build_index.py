@@ -53,7 +53,7 @@ def pick_device(preferred: str | None) -> torch.device:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build FAISS index from a Two-Tower ckpt.")
     p.add_argument("--checkpoint", type=str, required=True)
-    p.add_argument("--graph", type=str, default="data/processed/hetero_graph.pt")
+    p.add_argument("--graph", type=str, default="data/processed/hetero_graph_vehicle.pt")
     p.add_argument("--out-dir", type=str, default="outputs/index")
     p.add_argument("--device", type=str, default=None)
     return p.parse_args()

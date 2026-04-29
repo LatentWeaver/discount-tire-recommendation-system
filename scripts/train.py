@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
                    choices=["softmax", "bpr", "bce"])
     p.add_argument("--amp", action="store_true",
                    help="Enable bf16 autocast on CUDA (≈1.5-2× speedup on Ampere+).")
-    # SGL-style self-supervised contrastive (Tier-1 augmentation A).
+    # SGL-style self-supervised contrastive.
     p.add_argument("--ssl-lambda", type=float, default=0.0,
                    help="Weight on the SGL contrastive loss. 0 disables. Try 0.1.")
     p.add_argument("--ssl-edge-drop", type=float, default=0.2)
@@ -79,11 +79,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ssl-tau", type=float, default=0.5)
     p.add_argument("--ssl-sample-size", type=int, default=1024,
                    help="Subset of users + tires used per InfoNCE step.")
-    # History-pool dropout (Tier-1 augmentation E).
+    # History-pool dropout.
     p.add_argument("--history-drop", type=float, default=0.0,
                    help="Probability of dropping each (user, train-positive) pair "
                         "before mean-pooling. 0 disables. Try 0.3.")
-    # Hard-negative mining (Tier-1 augmentation B).
+    # Hard-negative mining.
     p.add_argument("--hard-neg-k", type=int, default=0,
                    help="Hard negatives per positive, drawn from (brand ∪ size) buckets. "
                         "0 disables. Try 4–8 for softmax; 1 for bpr/bce.")
@@ -94,6 +94,9 @@ def parse_args() -> argparse.Namespace:
                    default="outputs/checkpoints/two_tower.pt")
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--graph-path", type=str,
+                   default="data/processed/hetero_graph.pt",
+                   help="Relative-to-project-root path of the .pt graph payload.")
     return p.parse_args()
 
 
@@ -101,8 +104,9 @@ def main() -> None:
     args = parse_args()
     torch.manual_seed(args.seed)
 
-    graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph.pt"
+    graph_path = PROJECT_ROOT / args.graph_path
     payload = torch.load(graph_path, weights_only=False)
+    print(f"Loaded graph payload from {graph_path}")
     data = payload["graph"]
 
     device = pick_device(args.device)
@@ -114,6 +118,7 @@ def main() -> None:
         data,
         rating_threshold=args.rating_threshold,
         seed=args.seed,
+        review_df=payload.get("review_df"),
     )
 
     model = TwoTowerRecommender.from_data(

@@ -183,7 +183,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", type=str,
                    default="outputs/checkpoints/two_tower_e20.pt")
     p.add_argument("--index-dir", type=str, default="outputs/index")
-    p.add_argument("--graph", type=str, default="data/processed/hetero_graph.pt")
+    p.add_argument("--graph", type=str, default="data/processed/hetero_graph_vehicle.pt")
     p.add_argument("--k", type=int, default=10)
 
     # Cold-start preference filters.

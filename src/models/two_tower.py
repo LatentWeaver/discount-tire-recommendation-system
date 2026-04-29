@@ -7,8 +7,7 @@ Two-Tower retrieval model on top of the HGT encoder.
   score(u, t) = user_vec · item_vec    (ℓ2-normalised, dot == cosine)
 
 If ``data["tire"].text_x`` is present (a precomputed sentence-transformer
-embedding), it is fused into the item tower via a learnable projection
-(Tier-1 augmentation C in new_instructions.md).
+embedding), it is fused into the item tower via a learnable projection.
 """
 
 from __future__ import annotations
