@@ -219,6 +219,17 @@ class BPRSampler:
         self._gen = torch.Generator().manual_seed(seed + 1)
 
     # ──────────────────────────────────────────────────────────────────
+    def sample_pos(self, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Draw one mini-batch of (user, positive) pairs — no negatives.
+
+        Used by the sampled-softmax loss, which gets its negatives from the
+        other positives in the batch (in-batch negatives) and therefore
+        does not need the per-row rejection loop.
+        """
+        n = self.train_users.size(0)
+        idx = torch.randint(0, n, (batch_size,), generator=self._gen)
+        return self.train_users[idx], self.train_tires[idx]
+
     def sample(
         self, batch_size: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

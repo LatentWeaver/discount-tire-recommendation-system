@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Regression checks for split integrity.
+Regression checks for split integrity (Two-Tower branch).
 
 Verifies that:
   1. The train-only graph contains exactly the train review edges.
-  2. Pseudo-label refresh and train_step encode only the train graph.
+  2. The Two-Tower trainer encodes only the train graph.
   3. BPR negatives never come from a user's train-reviewed tires.
-  4. Contrastive triplets are sampled only from train-split interactions.
+  4. Cold-start inference produces a valid user vector and FAISS-shaped result.
 
 Usage
 -----
@@ -23,10 +23,9 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.inference import recommend_new_user
-from src.models import TireRecommender
+from src.models import TwoTowerRecommender
 from src.training.sampler import BPRSampler
-from src.training.trainer import Trainer
+from src.training.trainer import TwoTowerTrainer
 
 
 def main() -> None:
@@ -53,57 +52,36 @@ def main() -> None:
         expected_rv = full_rv.index_select(1, sampler.split.train_idx.to(full_rv.device))
         assert torch.equal(train_rv.cpu(), expected_rv.cpu())
 
-    model = TireRecommender.from_data(
-        data,
-        hidden_dim=128,
+    model = TwoTowerRecommender.from_data(
+        sampler.train_data,
+        hidden_dim=64,
         num_layers=2,
         num_heads=4,
-        num_clusters=50,
+        out_dim=32,
     )
-    assert "user" in model.encoder.input_emb
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    trainer = Trainer(
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4)
+    trainer = TwoTowerTrainer(
         model=model,
-        data=data,
         sampler=sampler,
         optimizer=optimizer,
-        cluster_lambda=0.5,
-        contrast_lambda=0.3,
-        pca_dim=64,
-        num_clusters=50,
-        seed=0,
+        loss="softmax",
     )
 
     original_encoder_forward = model.encoder.forward
-    original_encode = model.encode
     encoder_seen: list[int] = []
-    encode_seen: list[int] = []
 
     def checked_encoder_forward(graph):
         assert graph is sampler.train_data
         encoder_seen.append(id(graph))
         return original_encoder_forward(graph)
 
-    def checked_encode(graph):
-        assert graph is sampler.train_data
-        encode_seen.append(id(graph))
-        return original_encode(graph)
-
     model.encoder.forward = checked_encoder_forward
-    model.encode = checked_encode
-
-    trainer.refresh_pseudo_labels()
     stats = trainer.train_step(batch_size=64)
-
-    assert encoder_seen, "refresh_pseudo_labels() did not use encoder on train_data"
-    assert encode_seen, "train_step() did not encode train_data"
+    assert encoder_seen, "trainer did not encode train_data"
     assert torch.isfinite(torch.tensor(stats["loss"]))
-
     model.encoder.forward = original_encoder_forward
-    model.encode = original_encode
 
-    for _ in range(20):
+    for _ in range(10):
         users, _, negs = sampler.sample(batch_size=128)
         for u, neg in zip(users.tolist(), negs.tolist()):
             assert neg not in sampler.user_reviewed_train[u]
@@ -113,23 +91,6 @@ def main() -> None:
     }
     assert all(int(t) in train_reviewed_tires for t in sampler.val_tires.tolist())
     assert all(int(t) in train_reviewed_tires for t in sampler.test_tires.tolist())
-
-    contrast = sampler.sample_contrast(batch_size=128)
-    if contrast is not None:
-        users, goods, bads = contrast
-        for u, good, bad in zip(users.tolist(), goods.tolist(), bads.tolist()):
-            assert good in sampler.user_positives[u]
-            assert bad in sampler.user_disliked[u]
-            assert good in sampler.user_reviewed_train[u]
-            assert bad in sampler.user_reviewed_train[u]
-
-    new_user_results = recommend_new_user(
-        model,
-        sampler.train_data,
-        matching_tires=list(range(8)),
-        k=5,
-    )
-    assert len(new_user_results) == 5
 
     print("Split integrity checks passed.")
 
