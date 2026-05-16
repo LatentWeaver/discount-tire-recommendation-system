@@ -30,7 +30,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import numpy as np
 import torch
-import faiss  # must follow torch — see scripts/inference.py for context
+import faiss  # must follow torch — avoids OMP duplicate-symbol crash on macOS
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -53,7 +53,7 @@ def pick_device(preferred: str | None) -> torch.device:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build FAISS index from a Two-Tower ckpt.")
     p.add_argument("--checkpoint", type=str, required=True)
-    p.add_argument("--graph", type=str, default="data/processed/hetero_graph_vehicle.pt")
+    p.add_argument("--graph", type=str, default="data/processed/hetero_graph_movielens.pt")
     p.add_argument("--out-dir", type=str, default="outputs/index")
     p.add_argument("--device", type=str, default=None)
     return p.parse_args()

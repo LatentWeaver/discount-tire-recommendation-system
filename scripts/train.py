@@ -55,7 +55,7 @@ from src.training.trainer import TwoTowerTrainer
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train the Two-Tower tire recommender.")
+    p = argparse.ArgumentParser(description="Train the Two-Tower HGT recommender.")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--steps-per-epoch", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=512)
@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--graph-path", type=str,
-                   default="data/processed/hetero_graph.pt",
+                   default="data/processed/hetero_graph_movielens.pt",
                    help="Relative-to-project-root path of the .pt graph payload.")
     return p.parse_args()
 

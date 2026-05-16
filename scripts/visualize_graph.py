@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-Visualize the heterogeneous tire graph.
+Visualize the heterogeneous MovieLens graph.
+
+Code-level schema keys stay as ``user``/``tire``/``brand``/``size`` (so the
+encoder, sampler, etc. continue to work). For display, those slots are
+relabelled to their MovieLens roles: user / movie / genre / decade.
 
 Generates several plots:
   1. Schema diagram  -- node types and edge types as a meta-graph
   2. Subgraph sample -- a small sampled neighbourhood for inspection
   3. Degree distributions per node type
-  4. Tire feature distributions (histograms)
+  4. Movie node feature distributions (histograms)
 
 Usage
 -----
     uv run python scripts/visualize_graph.py
-    uv run python scripts/visualize_graph.py --graph data/processed/hetero_graph_vehicle.pt
+    uv run python scripts/visualize_graph.py --graph data/processed/hetero_graph_movielens.pt
 """
 
 from __future__ import annotations
@@ -36,6 +40,15 @@ NODE_COLORS = {
     "tire":  "#E07B53",   # orange
     "brand": "#6DBE6D",   # green
     "size":  "#C27ABA",   # purple
+}
+
+# Display-only labels: the code keeps the generic schema keys, but the figures
+# read in MovieLens-native words so the entities look right to a reader.
+DISPLAY_NAMES = {
+    "user":  "user",
+    "tire":  "movie",
+    "brand": "genre",
+    "size":  "decade",
 }
 
 EDGE_COLORS = {
@@ -75,7 +88,7 @@ def plot_schema(data, save_path: Path) -> None:
             facecolor=color, edgecolor="white", linewidth=2, zorder=3,
             alpha=0.9, boxstyle="round,pad=0.02",
         ))
-        ax.text(x, y + 0.02, ntype, ha="center", va="center",
+        ax.text(x, y + 0.02, DISPLAY_NAMES.get(ntype, ntype), ha="center", va="center",
                 fontsize=12, fontweight="bold", color="white", zorder=4)
         ax.text(x, y - 0.08, f"({count:,})", ha="center", va="center",
                 fontsize=9, color="white", alpha=0.85, zorder=4)
@@ -110,7 +123,7 @@ def plot_schema(data, save_path: Path) -> None:
     ax.set_ylim(0.1, 1.8)
     ax.set_aspect("equal")
     ax.axis("off")
-    ax.set_title("Heterogeneous Graph Schema", fontsize=14, fontweight="bold", pad=15)
+    ax.set_title("MovieLens Heterogeneous Graph Schema", fontsize=14, fontweight="bold", pad=15)
 
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
@@ -128,32 +141,32 @@ def plot_subgraph_sample(data, save_path: Path, num_users: int = 5) -> None:
 
     # Get review edges
     ei = data["user", "reviews", "tire"].edge_index.numpy()
-    sampled_tires = set()
+    sampled_movies = set()
     for uid in user_indices:
         mask = ei[0] == uid
-        tires = ei[1][mask]
+        movies = ei[1][mask]
         G.add_node(f"U{uid}", ntype="user")
-        for tid in tires:
-            G.add_node(f"T{tid}", ntype="tire")
-            G.add_edge(f"U{uid}", f"T{tid}")
-            sampled_tires.add(tid)
+        for mid in movies:
+            G.add_node(f"M{mid}", ntype="tire")
+            G.add_edge(f"U{uid}", f"M{mid}")
+            sampled_movies.add(mid)
 
-    # Add brand/size edges for sampled tires
+    # Add genre/decade edges for sampled movies
     if ("tire", "belongs_to", "brand") in data.edge_types:
         ei_brand = data["tire", "belongs_to", "brand"].edge_index.numpy()
-        for tid in sampled_tires:
-            mask = ei_brand[0] == tid
-            for bid in ei_brand[1][mask]:
-                G.add_node(f"B{bid}", ntype="brand")
-                G.add_edge(f"T{tid}", f"B{bid}")
+        for mid in sampled_movies:
+            mask = ei_brand[0] == mid
+            for gid in ei_brand[1][mask]:
+                G.add_node(f"G{gid}", ntype="brand")
+                G.add_edge(f"M{mid}", f"G{gid}")
 
     if ("tire", "has_spec", "size") in data.edge_types:
         ei_size = data["tire", "has_spec", "size"].edge_index.numpy()
-        for tid in sampled_tires:
-            mask = ei_size[0] == tid
-            for sid in ei_size[1][mask]:
-                G.add_node(f"S{sid}", ntype="size")
-                G.add_edge(f"T{tid}", f"S{sid}")
+        for mid in sampled_movies:
+            mask = ei_size[0] == mid
+            for did in ei_size[1][mask]:
+                G.add_node(f"D{did}", ntype="size")
+                G.add_edge(f"M{mid}", f"D{did}")
 
     # Colour nodes by type
     colors = []
@@ -166,12 +179,15 @@ def plot_subgraph_sample(data, save_path: Path, num_users: int = 5) -> None:
     nx.draw_networkx_nodes(G, pos, ax=ax, node_color=colors, node_size=120, alpha=0.85)
     nx.draw_networkx_edges(G, pos, ax=ax, edge_color="#CCCCCC", alpha=0.5, width=0.8)
 
-    # Legend
-    handles = [mpatches.Patch(color=c, label=t) for t, c in NODE_COLORS.items()]
+    # Legend uses display names
+    handles = [
+        mpatches.Patch(color=c, label=DISPLAY_NAMES.get(t, t))
+        for t, c in NODE_COLORS.items()
+    ]
     ax.legend(handles=handles, loc="upper left", fontsize=9, framealpha=0.9)
 
     ax.set_title(
-        f"Subgraph sample ({num_users} users, {len(sampled_tires)} tires)",
+        f"MovieLens subgraph sample ({num_users} users, {len(sampled_movies)} movies)",
         fontsize=13, fontweight="bold",
     )
     ax.axis("off")
@@ -208,7 +224,9 @@ def plot_degree_distributions(data, save_path: Path) -> None:
                 color=NODE_COLORS.get(src_type, "#999"), alpha=0.8, edgecolor="white")
         ax.set_xlabel("Degree", fontsize=10)
         ax.set_ylabel("Count", fontsize=10)
-        ax.set_title(f"{src_type} --[{rel}]--> {dst_type}", fontsize=11, fontweight="bold")
+        src_label = DISPLAY_NAMES.get(src_type, src_type)
+        dst_label = DISPLAY_NAMES.get(dst_type, dst_type)
+        ax.set_title(f"{src_label} --[{rel}]--> {dst_label}", fontsize=11, fontweight="bold")
 
         # Add stats annotation
         ax.text(0.95, 0.95,
@@ -223,17 +241,22 @@ def plot_degree_distributions(data, save_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_tire_features(data, save_path: Path) -> None:
-    """Histogram of each tire feature dimension."""
+def plot_movie_features(data, save_path: Path) -> None:
+    """Histogram of each movie feature dimension."""
     features = data["tire"].x.numpy()
     num_feats = features.shape[1]
+    # Layout from src/data_processing/preprocessing_movielens.py:
+    #   [avg_rating, rating_std, rating_count, release_year, *19 genre flags]
     feat_names = [
-        "price", "avg_rating", "rating_count", "treadwear",
-        "traction", "temperature", "speed_rating",
+        "average_rating", "rating_std", "rating_count", "release_year",
+        "unknown", "Action", "Adventure", "Animation", "Children",
+        "Comedy", "Crime", "Documentary", "Drama", "Fantasy",
+        "FilmNoir", "Horror", "Musical", "Mystery", "Romance",
+        "SciFi", "Thriller", "War", "Western",
     ]
-    # Extend names if needed
     while len(feat_names) < num_feats:
         feat_names.append(f"feature_{len(feat_names)}")
+    feat_names = feat_names[:num_feats]
 
     cols = min(4, num_feats)
     rows = (num_feats + cols - 1) // cols
@@ -250,14 +273,14 @@ def plot_tire_features(data, save_path: Path) -> None:
     for i in range(num_feats, len(axes)):
         axes[i].set_visible(False)
 
-    fig.suptitle("Tire Node Feature Distributions (after scaling)", fontsize=13, fontweight="bold")
+    fig.suptitle("Movie Node Feature Distributions (after scaling)", fontsize=13, fontweight="bold")
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
     print(f"  Feature distributions saved to {save_path}")
     plt.close(fig)
 
 
-def main(graph_path: str = "data/processed/hetero_graph_vehicle.pt") -> None:
+def main(graph_path: str = "data/processed/hetero_graph_movielens.pt") -> None:
     full_path = PROJECT_ROOT / graph_path
     print(f"Loading graph from {full_path} ...")
     loaded = torch.load(full_path, weights_only=False)
@@ -270,15 +293,15 @@ def main(graph_path: str = "data/processed/hetero_graph_vehicle.pt") -> None:
     plot_schema(data, output_dir / "graph_schema.png")
     plot_subgraph_sample(data, output_dir / "subgraph_sample.png")
     plot_degree_distributions(data, output_dir / "degree_distributions.png")
-    plot_tire_features(data, output_dir / "tire_feature_distributions.png")
+    plot_movie_features(data, output_dir / "movie_feature_distributions.png")
 
     print(f"\nAll figures saved to {output_dir}/")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Visualize the heterogeneous tire graph")
+    parser = argparse.ArgumentParser(description="Visualize the MovieLens heterogeneous graph")
     parser.add_argument(
-        "--graph", default="data/processed/hetero_graph_vehicle.pt",
+        "--graph", default="data/processed/hetero_graph_movielens.pt",
         help="Path to the saved HeteroData .pt file",
     )
     args = parser.parse_args()

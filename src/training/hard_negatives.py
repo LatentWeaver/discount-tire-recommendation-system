@@ -1,18 +1,17 @@
 """
 Hard-negative mining within (brand ∪ size) buckets.
 
-For each tire ``t``, the hard-negative candidate pool is the union of
-- other tires sharing ``t``'s brand
-- other tires sharing ``t``'s size
+For each item ``t``, the hard-negative candidate pool is the union of
+- other items sharing ``t``'s brand-slot node
+- other items sharing ``t``'s size-slot node
 
-stored as a CSR-style (offsets, indices) pair so per-tire sampling is a
+stored as a CSR-style (offsets, indices) pair so per-item sampling is a
 single randint into a contiguous slice on GPU.
 
 Why brand ∪ size: random negatives are trivially different from a
-positive (different size, different brand). The model only learns to
-separate "235/40R18 Michelin" from "P175/70R14 Cooper" — easy. Hard
-negatives within the same brand or size force the model to discriminate
-among substitutes, which is what real retrieval needs to do.
+positive — easy. Hard negatives within the same brand or size force the
+model to discriminate among substitutes, which is what real retrieval
+needs to do.
 """
 
 from __future__ import annotations

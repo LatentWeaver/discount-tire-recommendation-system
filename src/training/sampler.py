@@ -4,12 +4,12 @@ BPR + contrastive triplet sampler.
 Two sampling streams sharing one user / item index:
 
   ``sample()`` — BPR triplets (u, t+, t-)
-      t+  = a tire u rated at or above ``rating_threshold``
-      t-  = a random tire absent from the user's train-split reviews
+      t+  = an item u rated at or above ``rating_threshold``
+      t-  = a random item absent from the user's train-split reviews
 
   ``sample_contrast()`` — contrastive triplets (u, t_good, t_disliked)
-      t_good     = a tire u rated at or above ``rating_threshold``
-      t_disliked = a tire u rated *below* ``rating_threshold``
+      t_good     = an item u rated at or above ``rating_threshold``
+      t_disliked = an item u rated *below* ``rating_threshold``
       Only sampled from users who have at least one of each in train.
 
 Random train / val / test split happens here so the trainer and
@@ -174,12 +174,11 @@ class BPRSampler:
         )
         self.train_data = self.split.train_data
 
-        # Close the tire-feature aggregate leak: overwrite data['tire'].x with
-        # per-tire aggregates recomputed from train edges only. Triggered when
-        # the caller passes the per-review DataFrame (vehicle pipeline does;
-        # legacy user-based path can't, so it's optional).
+        # Close the item-feature aggregate leak: overwrite data['tire'].x with
+        # per-item aggregates recomputed from train edges only. Triggered when
+        # the caller passes the per-review DataFrame.
         if review_df is not None:
-            from src.data_processing.preprocessing_vehicle import (
+            from src.data_processing.preprocessing_movielens import (
                 recompute_tire_features_from_train,
             )
             full_edge_index = data["user", "reviews", "tire"].edge_index

@@ -3,11 +3,11 @@ Graph augmentations for SGL-style self-supervised contrastive learning.
 
 Two augmented views are produced per training step:
   - Random review-edge dropout (forward + reverse pair, kept consistent).
-  - Random tire-feature column dropout on ``data["tire"].x`` (and on
+  - Random item-feature column dropout on ``data["tire"].x`` (and on
     ``data["tire"].text_x`` if present).
 
 Brand/size edges are NOT dropped — losing them would change the meaning
-of those structural relations (a tire still belongs to its brand).
+of those structural relations (an item still belongs to its brand).
 """
 
 from __future__ import annotations

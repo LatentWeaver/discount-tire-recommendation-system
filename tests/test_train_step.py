@@ -29,7 +29,7 @@ from src.training.trainer import TwoTowerTrainer
 def main() -> None:
     torch.manual_seed(0)
 
-    graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph_vehicle.pt"
+    graph_path = PROJECT_ROOT / "data" / "processed" / "hetero_graph_movielens.pt"
     payload = torch.load(graph_path, weights_only=False)
     data = payload["graph"]
 
