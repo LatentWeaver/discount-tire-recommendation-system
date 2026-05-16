@@ -84,8 +84,10 @@ def sample_hard_negatives(
     ends = offsets[pos_tires + 1]               # (B,)
     lengths = (ends - starts).clamp(min=1)      # avoid div-by-zero — cold rows replaced below
 
-    # Random offset into each bucket: 0..lengths[i]-1.
-    rand = torch.rand((B, k_hard), generator=generator, device=device)
+    # MPS generators are not yet supported; sample on the generator's device
+    # (typically CPU when running on MPS) and move the result.
+    gen_device = generator.device if generator is not None else device
+    rand = torch.rand((B, k_hard), generator=generator, device=gen_device).to(device)
     offs = (rand * lengths.unsqueeze(-1).float()).long()
     offs = offs.clamp(max=lengths.unsqueeze(-1) - 1)
     flat_pos = starts.unsqueeze(-1) + offs       # (B, k_hard)
@@ -96,8 +98,8 @@ def sample_hard_negatives(
     cold = (true_lengths == 0).unsqueeze(-1).expand_as(hard)
     if cold.any():
         rand_tires = torch.randint(
-            0, num_tires, (B, k_hard), generator=generator, device=device
-        )
+            0, num_tires, (B, k_hard), generator=generator, device=gen_device,
+        ).to(device)
         hard = torch.where(cold, rand_tires, hard)
 
     return hard

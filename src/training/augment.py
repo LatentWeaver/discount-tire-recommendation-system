@@ -30,11 +30,18 @@ def augment_view(
     fw_key = ("user", "reviews", "tire")
     rv_key = ("tire", "rev_by", "user")
 
+    # MPS generators are not yet supported; sample on the generator's device
+    # (typically CPU when running on MPS) and move the mask.
+    gen_device = generator.device if generator is not None else None
+
     # ── Edge dropout (review edges) ──────────────────────────────────
     if edge_drop > 0:
         fw_e = data[fw_key].edge_index
         n_edges = fw_e.size(1)
-        keep_mask = torch.rand(n_edges, generator=generator, device=fw_e.device) >= edge_drop
+        sample_device = gen_device if gen_device is not None else fw_e.device
+        keep_mask = (
+            torch.rand(n_edges, generator=generator, device=sample_device) >= edge_drop
+        ).to(fw_e.device)
         # Always keep at least one edge so the encoder has something to pass.
         if keep_mask.sum() == 0:
             keep_mask[0] = True
@@ -55,12 +62,19 @@ def augment_view(
     if feat_drop > 0:
         tire_store = view["tire"]
         x = data["tire"].x
-        col_mask = torch.rand(x.size(-1), generator=generator, device=x.device) >= feat_drop
+        sample_device = gen_device if gen_device is not None else x.device
+        col_mask = (
+            torch.rand(x.size(-1), generator=generator, device=sample_device) >= feat_drop
+        ).to(x.device)
         tire_store.x = x * col_mask.float()
 
         text_x = getattr(data["tire"], "text_x", None)
         if text_x is not None:
-            t_mask = torch.rand(text_x.size(-1), generator=generator, device=text_x.device) >= feat_drop
+            t_sample_device = gen_device if gen_device is not None else text_x.device
+            t_mask = (
+                torch.rand(text_x.size(-1), generator=generator, device=t_sample_device)
+                >= feat_drop
+            ).to(text_x.device)
             tire_store.text_x = text_x * t_mask.float()
 
     return view
