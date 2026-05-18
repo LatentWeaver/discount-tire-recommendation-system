@@ -87,7 +87,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hard-neg-k", type=int, default=0,
                    help="Hard negatives per positive, drawn from (brand ∪ size) buckets. "
                         "0 disables. Try 4–8 for softmax; 1 for bpr/bce.")
-    p.add_argument("--rating-threshold", type=float, default=4.0)
     p.add_argument("--eval-every", type=int, default=1)
     p.add_argument("--best-metric", type=str, default="Recall@20")
     p.add_argument("--save-path", type=str,
@@ -95,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--graph-path", type=str,
-                   default="data/processed/hetero_graph_movielens.pt",
+                   default="data/processed/hetero_graph_yelp2018.pt",
                    help="Relative-to-project-root path of the .pt graph payload.")
     return p.parse_args()
 
@@ -114,11 +113,13 @@ def main() -> None:
         enable_cuda_perf_flags()
     data = data.to(device)
 
+    # Yelp 2018 graphs are implicit-feedback (no edge_attr) and ship a
+    # precomputed train/val/test split that the sampler honors verbatim.
     sampler = BPRSampler(
         data,
-        rating_threshold=args.rating_threshold,
+        rating_threshold=None,
         seed=args.seed,
-        review_df=payload.get("review_df"),
+        precomputed_split=payload.get("precomputed_split"),
     )
 
     model = TwoTowerRecommender.from_data(

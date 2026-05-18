@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Visualize the heterogeneous MovieLens graph.
+Visualize the LightGCN Yelp 2018 heterogeneous graph.
 
-Code-level schema keys stay as ``user``/``tire``/``brand``/``size`` (so the
-encoder, sampler, etc. continue to work). For display, those slots are
-relabelled to their MovieLens roles: user / movie / genre / decade.
+Three figures land in ``outputs/figures/``:
 
-Generates several plots:
-  1. Schema diagram  -- node types and edge types as a meta-graph
-  2. Subgraph sample -- a small sampled neighbourhood for inspection
-  3. Degree distributions per node type
-  4. Movie node feature distributions (histograms)
+  graph_schema.png       — node/edge-type diagram (HGT slot view)
+  degree_distributions.png — user + item interaction-count CCDFs (log–log)
+  subgraph_sample.png    — a bipartite subgraph sample of N users and the
+                           items they interacted with in the train split
+
+Only TRAIN edges drive the sample so the picture matches what the encoder
+sees during message passing (val/test edges are held out and never visible
+to the model).
 
 Usage
 -----
     uv run python scripts/visualize_graph.py
-    uv run python scripts/visualize_graph.py --graph data/processed/hetero_graph_movielens.pt
+    uv run python scripts/visualize_graph.py --num-users 12 --seed 7
 """
 
 from __future__ import annotations
@@ -25,284 +26,222 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import networkx as nx
 import numpy as np
 import torch
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
-# ── Colour palette for node types ─────────────────────────
-NODE_COLORS = {
-    "user":  "#4A90D9",   # blue
-    "tire":  "#E07B53",   # orange
-    "brand": "#6DBE6D",   # green
-    "size":  "#C27ABA",   # purple
-}
-
-# Display-only labels: the code keeps the generic schema keys, but the figures
-# read in MovieLens-native words so the entities look right to a reader.
-DISPLAY_NAMES = {
-    "user":  "user",
-    "tire":  "movie",
-    "brand": "genre",
-    "size":  "decade",
-}
-
-EDGE_COLORS = {
-    "reviews":    "#7BAFD4",
-    "rev_by":     "#7BAFD4",
-    "belongs_to": "#A0D4A0",
-    "has":        "#A0D4A0",
-    "has_spec":   "#D4A0CC",
-    "spec_of":    "#D4A0CC",
-}
+def _train_user_item_edges(payload: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Return (user_idx, item_idx) int arrays restricted to the train slice."""
+    data = payload["graph"]
+    edge_index = data["user", "reviews", "tire"].edge_index.cpu().numpy()
+    split = payload.get("precomputed_split")
+    if split is None:
+        return edge_index[0], edge_index[1]
+    train_idx = split["train_idx"].cpu().numpy()
+    return edge_index[0, train_idx], edge_index[1, train_idx]
 
 
-def plot_schema(data, save_path: Path) -> None:
-    """Draw the meta-graph: node types as boxes, edge types as arrows."""
-    G = nx.MultiDiGraph()
+# ── 1. Schema diagram ────────────────────────────────────────────────
+def plot_schema(out_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.set_xlim(0, 10); ax.set_ylim(0, 6); ax.axis("off")
 
-    for ntype in data.node_types:
-        G.add_node(ntype)
-
-    for src, rel, dst in data.edge_types:
-        G.add_edge(src, dst, label=rel)
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    pos = {
-        "user":  (0.0, 1.0),
-        "tire":  (1.0, 1.0),
-        "brand": (2.0, 1.5),
-        "size":  (2.0, 0.5),
+    nodes = {
+        "user":  (1.2, 3.0, "#4C72B0"),
+        "tire":  (5.0, 3.0, "#DD8452"),
+        "brand": (8.4, 4.4, "#55A868"),
+        "size":  (8.4, 1.6, "#C44E52"),
     }
-
-    # Draw nodes
-    for ntype, (x, y) in pos.items():
-        color = NODE_COLORS.get(ntype, "#CCCCCC")
-        count = data[ntype].num_nodes
-        ax.add_patch(mpatches.FancyBboxPatch(
-            (x - 0.25, y - 0.15), 0.5, 0.3,
-            facecolor=color, edgecolor="white", linewidth=2, zorder=3,
-            alpha=0.9, boxstyle="round,pad=0.02",
+    labels = {
+        "user":  "user\n(31 668)",
+        "tire":  "item\n(38 048)",
+        "brand": "brand\n(1 — ALL)",
+        "size":  "size\n(1 — ALL)",
+    }
+    for k, (x, y, c) in nodes.items():
+        ax.add_patch(FancyBboxPatch(
+            (x - 0.7, y - 0.45), 1.4, 0.9,
+            boxstyle="round,pad=0.05", linewidth=1.4,
+            edgecolor=c, facecolor=c, alpha=0.25,
         ))
-        ax.text(x, y + 0.02, DISPLAY_NAMES.get(ntype, ntype), ha="center", va="center",
-                fontsize=12, fontweight="bold", color="white", zorder=4)
-        ax.text(x, y - 0.08, f"({count:,})", ha="center", va="center",
-                fontsize=9, color="white", alpha=0.85, zorder=4)
+        ax.text(x, y, labels[k], ha="center", va="center", fontsize=11, fontweight="bold")
 
-    # Draw edges with curved arrows
-    drawn = set()
-    for src, rel, dst in data.edge_types:
-        pair_key = tuple(sorted([src, dst])) + (rel,)
-        if pair_key in drawn:
-            continue
-        drawn.add(pair_key)
+    def arrow(src: str, dst: str, label: str, offset: tuple[float, float] = (0.0, 0.18)) -> None:
+        x1, y1, _ = nodes[src]
+        x2, y2, _ = nodes[dst]
+        ax.add_patch(FancyArrowPatch(
+            (x1 + 0.7, y1), (x2 - 0.7, y2),
+            arrowstyle="-|>", mutation_scale=18,
+            color="#333", linewidth=1.2,
+        ))
+        mx, my = (x1 + x2) / 2 + offset[0], (y1 + y2) / 2 + offset[1]
+        ax.text(mx, my, label, ha="center", va="center", fontsize=9,
+                style="italic", color="#333")
 
-        x0, y0 = pos[src]
-        x1, y1 = pos[dst]
-        edge_count = data[src, rel, dst].edge_index.shape[1]
-        color = EDGE_COLORS.get(rel, "#999999")
+    arrow("user", "tire", "reviews")
+    arrow("tire", "brand", "belongs_to")
+    arrow("tire", "size",  "has_spec")
 
-        ax.annotate(
-            "", xy=(x1 - 0.25, y1), xytext=(x0 + 0.25, y0),
-            arrowprops=dict(
-                arrowstyle="-|>", color=color, lw=1.8,
-                connectionstyle="arc3,rad=0.15",
-            ),
-            zorder=2,
+    ax.set_title("LightGCN Yelp 2018 — HGT Graph Schema",
+                 fontsize=13, fontweight="bold", pad=14)
+    ax.text(5, 0.3,
+            "Implicit feedback only — every (user→item) edge is a positive interaction.\n"
+            "brand & size collapse to a single ALL node (LightGCN release has no item categories).",
+            ha="center", va="center", fontsize=9, color="#555")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  → {out_path}")
+
+
+# ── 2. Degree distributions ──────────────────────────────────────────
+def plot_degree_distributions(
+    user_idx: np.ndarray,
+    item_idx: np.ndarray,
+    num_users: int,
+    num_items: int,
+    out_path: Path,
+) -> None:
+    user_deg = np.bincount(user_idx, minlength=num_users)
+    item_deg = np.bincount(item_idx, minlength=num_items)
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+    for ax, deg, title, color in [
+        (axes[0], user_deg, "Interactions per user", "#4C72B0"),
+        (axes[1], item_deg, "Interactions per item", "#DD8452"),
+    ]:
+        deg_nonzero = deg[deg > 0]
+        bins = np.logspace(0, np.log10(max(deg_nonzero.max(), 2)), 40)
+        ax.hist(deg_nonzero, bins=bins, color=color, edgecolor="white", linewidth=0.4)
+        ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_title(
+            f"{title}\nn={deg_nonzero.size:,}  ·  "
+            f"min={deg_nonzero.min()}  ·  median={int(np.median(deg_nonzero))}  ·  "
+            f"max={deg_nonzero.max()}",
+            fontsize=10,
         )
-        mx, my = (x0 + x1) / 2, (y0 + y1) / 2 + 0.12
-        ax.text(mx, my, f"{rel}\n({edge_count:,})", ha="center", va="center",
-                fontsize=8, color="#333333",
-                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#CCCCCC", alpha=0.85))
+        ax.set_xlabel("degree (train edges)")
+        ax.set_ylabel("count of nodes")
+        ax.grid(True, which="both", alpha=0.3)
 
-    ax.set_xlim(-0.5, 2.7)
-    ax.set_ylim(0.1, 1.8)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    ax.set_title("MovieLens Heterogeneous Graph Schema", fontsize=14, fontweight="bold", pad=15)
-
+    fig.suptitle("Yelp 2018 — degree distributions (train split)",
+                 fontsize=12, fontweight="bold")
     fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
-    print(f"  Schema diagram saved to {save_path}")
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
+    print(f"  → {out_path}")
 
 
-def plot_subgraph_sample(data, save_path: Path, num_users: int = 5) -> None:
-    """Sample a small subgraph around a few users and visualize it."""
-    G = nx.Graph()
+# ── 3. Subgraph sample (bipartite) ───────────────────────────────────
+def plot_subgraph_sample(
+    user_idx: np.ndarray,
+    item_idx: np.ndarray,
+    num_users: int,
+    n_sample_users: int,
+    seed: int,
+    out_path: Path,
+) -> None:
+    rng = np.random.default_rng(seed)
+    # Sample users that have at least a couple of train interactions so the
+    # picture isn't dominated by hairline strands.
+    user_deg = np.bincount(user_idx, minlength=num_users)
+    eligible = np.where(user_deg >= 3)[0]
+    if eligible.size == 0:
+        raise RuntimeError("No users with ≥3 train interactions — graph too sparse to sample.")
+    sampled_users = rng.choice(eligible, size=min(n_sample_users, eligible.size), replace=False)
 
-    # Pick random users
-    rng = np.random.default_rng(42)
-    user_indices = rng.choice(data["user"].num_nodes, size=num_users, replace=False)
+    mask = np.isin(user_idx, sampled_users)
+    sub_u = user_idx[mask]
+    sub_t = item_idx[mask]
+    sampled_items = np.unique(sub_t)
 
-    # Get review edges
-    ei = data["user", "reviews", "tire"].edge_index.numpy()
-    sampled_movies = set()
-    for uid in user_indices:
-        mask = ei[0] == uid
-        movies = ei[1][mask]
-        G.add_node(f"U{uid}", ntype="user")
-        for mid in movies:
-            G.add_node(f"M{mid}", ntype="tire")
-            G.add_edge(f"U{uid}", f"M{mid}")
-            sampled_movies.add(mid)
+    g = nx.Graph()
+    for u in sampled_users:
+        g.add_node(("u", int(u)), bipartite=0)
+    for t in sampled_items:
+        g.add_node(("t", int(t)), bipartite=1)
+    for u, t in zip(sub_u, sub_t):
+        g.add_edge(("u", int(u)), ("t", int(t)))
 
-    # Add genre/decade edges for sampled movies
-    if ("tire", "belongs_to", "brand") in data.edge_types:
-        ei_brand = data["tire", "belongs_to", "brand"].edge_index.numpy()
-        for mid in sampled_movies:
-            mask = ei_brand[0] == mid
-            for gid in ei_brand[1][mask]:
-                G.add_node(f"G{gid}", ntype="brand")
-                G.add_edge(f"M{mid}", f"G{gid}")
+    user_nodes = [n for n in g.nodes if n[0] == "u"]
+    item_nodes = [n for n in g.nodes if n[0] == "t"]
+    n_u, n_i = len(user_nodes), len(item_nodes)
 
-    if ("tire", "has_spec", "size") in data.edge_types:
-        ei_size = data["tire", "has_spec", "size"].edge_index.numpy()
-        for mid in sampled_movies:
-            mask = ei_size[0] == mid
-            for did in ei_size[1][mask]:
-                G.add_node(f"D{did}", ntype="size")
-                G.add_edge(f"M{mid}", f"D{did}")
+    # Spring layout — users repel each other while items cluster around
+    # whichever users they connect to. Shared items end up between users
+    # and isolated items get pushed to the periphery.
+    pos = nx.spring_layout(g, k=1.6 / np.sqrt(max(g.number_of_nodes(), 1)),
+                           iterations=200, seed=seed)
 
-    # Colour nodes by type
-    colors = []
-    for node in G.nodes():
-        ntype = G.nodes[node].get("ntype", "tire")
-        colors.append(NODE_COLORS.get(ntype, "#CCCCCC"))
+    fig, ax = plt.subplots(figsize=(11, 9))
+    nx.draw_networkx_edges(g, pos, alpha=0.18, width=0.45, ax=ax)
+    # Items first (smaller, behind), users second (larger, in front).
+    nx.draw_networkx_nodes(g, pos, nodelist=item_nodes,
+                           node_color="#DD8452", node_size=28,
+                           edgecolors="white", linewidths=0.3, ax=ax,
+                           label="item")
+    nx.draw_networkx_nodes(g, pos, nodelist=user_nodes,
+                           node_color="#4C72B0", node_size=240,
+                           edgecolors="white", linewidths=1.0, ax=ax,
+                           label="user")
 
-    fig, ax = plt.subplots(figsize=(12, 8))
-    pos = nx.spring_layout(G, seed=42, k=1.5)
-    nx.draw_networkx_nodes(G, pos, ax=ax, node_color=colors, node_size=120, alpha=0.85)
-    nx.draw_networkx_edges(G, pos, ax=ax, edge_color="#CCCCCC", alpha=0.5, width=0.8)
-
-    # Legend uses display names
-    handles = [
-        mpatches.Patch(color=c, label=DISPLAY_NAMES.get(t, t))
-        for t, c in NODE_COLORS.items()
-    ]
-    ax.legend(handles=handles, loc="upper left", fontsize=9, framealpha=0.9)
-
-    ax.set_title(
-        f"MovieLens subgraph sample ({num_users} users, {len(sampled_movies)} movies)",
-        fontsize=13, fontweight="bold",
+    nx.draw_networkx_labels(
+        g, pos,
+        labels={n: f"u{n[1]}" for n in user_nodes},
+        font_size=8, font_color="white", font_weight="bold",
+        ax=ax,
     )
-    ax.axis("off")
 
+    ax.set_axis_off()
+    ax.set_title(
+        f"Yelp 2018 — random subgraph sample of {n_u} users "
+        f"({len(sub_u):,} train edges → {n_i:,} unique items)",
+        fontsize=11, fontweight="bold", pad=10,
+    )
+    ax.legend(loc="lower right", frameon=False, fontsize=9, markerscale=0.9)
     fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
-    print(f"  Subgraph sample saved to {save_path}")
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
+    print(f"  → {out_path}")
 
 
-def plot_degree_distributions(data, save_path: Path) -> None:
-    """Plot degree distribution for each edge type's source nodes."""
-    edge_types_to_plot = [
-        ("user", "reviews", "tire"),
-        ("tire", "belongs_to", "brand"),
-        ("tire", "has_spec", "size"),
-    ]
+def main(graph_path: str, num_users: int, seed: int) -> None:
+    full = PROJECT_ROOT / graph_path
+    print(f"Loading {full} ...")
+    payload = torch.load(full, weights_only=False)
+    data = payload["graph"]
+    n_users = int(data["user"].num_nodes)
+    n_items = int(data["tire"].num_nodes)
+    user_idx, item_idx = _train_user_item_edges(payload)
+    print(
+        f"  Users: {n_users:,}  ·  Items: {n_items:,}  ·  "
+        f"Train edges: {user_idx.size:,}"
+    )
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-
-    for ax, etype in zip(axes, edge_types_to_plot):
-        src_type, rel, dst_type = etype
-        if etype not in data.edge_types:
-            continue
-
-        ei = data[etype].edge_index
-        src_indices = ei[0].numpy()
-        num_src = data[src_type].num_nodes
-
-        # Count degree per source node
-        degrees = np.bincount(src_indices, minlength=num_src)
-
-        ax.hist(degrees, bins=min(50, int(degrees.max()) + 1),
-                color=NODE_COLORS.get(src_type, "#999"), alpha=0.8, edgecolor="white")
-        ax.set_xlabel("Degree", fontsize=10)
-        ax.set_ylabel("Count", fontsize=10)
-        src_label = DISPLAY_NAMES.get(src_type, src_type)
-        dst_label = DISPLAY_NAMES.get(dst_type, dst_type)
-        ax.set_title(f"{src_label} --[{rel}]--> {dst_label}", fontsize=11, fontweight="bold")
-
-        # Add stats annotation
-        ax.text(0.95, 0.95,
-                f"mean: {degrees.mean():.1f}\nmax: {degrees.max()}",
-                transform=ax.transAxes, ha="right", va="top", fontsize=9,
-                bbox=dict(boxstyle="round", fc="white", ec="#ccc", alpha=0.8))
-
-    fig.suptitle("Degree Distributions", fontsize=14, fontweight="bold")
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
-    print(f"  Degree distributions saved to {save_path}")
-    plt.close(fig)
-
-
-def plot_movie_features(data, save_path: Path) -> None:
-    """Histogram of each movie feature dimension."""
-    features = data["tire"].x.numpy()
-    num_feats = features.shape[1]
-    # Layout from src/data_processing/preprocessing_movielens.py:
-    #   [avg_rating, rating_std, rating_count, release_year, *19 genre flags]
-    feat_names = [
-        "average_rating", "rating_std", "rating_count", "release_year",
-        "unknown", "Action", "Adventure", "Animation", "Children",
-        "Comedy", "Crime", "Documentary", "Drama", "Fantasy",
-        "FilmNoir", "Horror", "Musical", "Mystery", "Romance",
-        "SciFi", "Thriller", "War", "Western",
-    ]
-    while len(feat_names) < num_feats:
-        feat_names.append(f"feature_{len(feat_names)}")
-    feat_names = feat_names[:num_feats]
-
-    cols = min(4, num_feats)
-    rows = (num_feats + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 3 * rows))
-    axes = np.array(axes).flatten()
-
-    for i in range(num_feats):
-        ax = axes[i]
-        ax.hist(features[:, i], bins=50, color=NODE_COLORS["tire"], alpha=0.8, edgecolor="white")
-        ax.set_title(feat_names[i], fontsize=10, fontweight="bold")
-        ax.set_ylabel("Count", fontsize=9)
-
-    # Hide unused axes
-    for i in range(num_feats, len(axes)):
-        axes[i].set_visible(False)
-
-    fig.suptitle("Movie Node Feature Distributions (after scaling)", fontsize=13, fontweight="bold")
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
-    print(f"  Feature distributions saved to {save_path}")
-    plt.close(fig)
-
-
-def main(graph_path: str = "data/processed/hetero_graph_movielens.pt") -> None:
-    full_path = PROJECT_ROOT / graph_path
-    print(f"Loading graph from {full_path} ...")
-    loaded = torch.load(full_path, weights_only=False)
-    data = loaded["graph"] if isinstance(loaded, dict) else loaded
-
-    output_dir = PROJECT_ROOT / "outputs" / "figures"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    print("Generating visualizations ...")
-    plot_schema(data, output_dir / "graph_schema.png")
-    plot_subgraph_sample(data, output_dir / "subgraph_sample.png")
-    plot_degree_distributions(data, output_dir / "degree_distributions.png")
-    plot_movie_features(data, output_dir / "movie_feature_distributions.png")
-
-    print(f"\nAll figures saved to {output_dir}/")
+    out_dir = PROJECT_ROOT / "outputs" / "figures"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print("Writing figures ...")
+    plot_schema(out_dir / "graph_schema.png")
+    plot_degree_distributions(user_idx, item_idx, n_users, n_items,
+                              out_dir / "degree_distributions.png")
+    plot_subgraph_sample(user_idx, item_idx, n_users, num_users, seed,
+                         out_dir / "subgraph_sample.png")
+    print("Done.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Visualize the MovieLens heterogeneous graph")
-    parser.add_argument(
-        "--graph", default="data/processed/hetero_graph_movielens.pt",
-        help="Path to the saved HeteroData .pt file",
-    )
+    parser = argparse.ArgumentParser(description="Visualize the Yelp 2018 hetero graph")
+    parser.add_argument("--graph", default="data/processed/hetero_graph_yelp2018.pt",
+                        help="Path (relative to project root) to the .pt payload.")
+    parser.add_argument("--num-users", type=int, default=10,
+                        help="Number of users in the bipartite subgraph sample.")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="RNG seed for the user sample.")
     args = parser.parse_args()
-    main(graph_path=args.graph)
+    main(graph_path=args.graph, num_users=args.num_users, seed=args.seed)

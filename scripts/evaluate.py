@@ -45,7 +45,7 @@ def pick_device(preferred: str | None) -> torch.device:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=str, required=True)
-    p.add_argument("--graph", type=str, default="data/processed/hetero_graph_movielens.pt")
+    p.add_argument("--graph", type=str, default="data/processed/hetero_graph_yelp2018.pt")
     p.add_argument("--ks", type=str, default="10,20,50")
     p.add_argument("--device", type=str, default=None)
     return p.parse_args()
@@ -67,8 +67,9 @@ def main() -> None:
 
     sampler = BPRSampler(
         data,
-        rating_threshold=train_args["rating_threshold"],
+        rating_threshold=None,
         seed=ckpt.get("split_seed", 0),
+        precomputed_split=payload.get("precomputed_split"),
     )
     train_data = sampler.train_data
 

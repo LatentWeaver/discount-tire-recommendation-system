@@ -1,0 +1,16 @@
+# Config for the LightGCN Yelp 2018 graph build.
+# Source: https://github.com/kuandeng/LightGCN/tree/master/Data/yelp2018
+# Schema mapping onto the existing graph_builder slots:
+#   user → LightGCN user_id   tire → business item_id
+#   brand → single "ALL" node   size → single "ALL" node
+# Implicit feedback only — no ratings, no timestamps, no item features.
+
+data:
+  raw_dir:        "data/raw/yelp2018"
+  processed_dir:  "data/processed"
+  graph_filename: "hetero_graph_yelp2018.pt"
+
+graph:
+  add_reverse_edges: true
+  val_ratio: 0.05     # carved from train; test split is LightGCN's verbatim 324K
+  seed: 0

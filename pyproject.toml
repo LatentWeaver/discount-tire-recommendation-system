@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "datasets>=4.8.5",
     "faiss-cpu>=1.13.2",
     "matplotlib>=3.10.8",
     "networkx>=3.6.1",

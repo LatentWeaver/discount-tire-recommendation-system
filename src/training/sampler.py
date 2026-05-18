@@ -54,9 +54,28 @@ class ReviewEdgeSplit:
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         seed: int = 0,
+        precomputed_split: dict[str, torch.Tensor] | None = None,
     ) -> "ReviewEdgeSplit":
         edge_index = data["user", "reviews", "tire"].edge_index
         n = edge_index.size(1)
+
+        if precomputed_split is not None:
+            train_idx = precomputed_split["train_idx"].long().cpu()
+            val_idx = precomputed_split["val_idx"].long().cpu()
+            test_idx = precomputed_split["test_idx"].long().cpu()
+            assigned = train_idx.numel() + val_idx.numel() + test_idx.numel()
+            if assigned != n:
+                raise RuntimeError(
+                    f"Precomputed split covers {assigned} edges but graph has {n}."
+                )
+            train_data = cls._build_train_graph(data, train_idx)
+            return cls(
+                train_idx=train_idx,
+                val_idx=val_idx,
+                test_idx=test_idx,
+                train_data=train_data,
+            )
+
         users = edge_index[0].tolist()
         tires = edge_index[1].tolist()
 
@@ -147,22 +166,21 @@ class BPRSampler:
     def __init__(
         self,
         data: HeteroData,
-        rating_threshold: float = 4.0,
+        rating_threshold: float | None = 4.0,
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         seed: int = 0,
-        review_df=None,
+        precomputed_split: dict[str, torch.Tensor] | None = None,
     ) -> None:
         edge_index = data["user", "reviews", "tire"].edge_index
         all_users = edge_index[0]
         all_tires = edge_index[1]
         edge_attr = getattr(data["user", "reviews", "tire"], "edge_attr", None)
 
-        if edge_attr is None or rating_threshold is None:
-            raise ValueError(
-                "BPRSampler needs edge ratings (edge_attr) and a rating_threshold"
-                " — bad reviews must be distinguishable from good ones."
-            )
+        # Implicit-feedback path activates when either piece is missing —
+        # every (user, item) edge becomes a positive and the contrastive
+        # good/bad split is skipped.
+        implicit = edge_attr is None or rating_threshold is None
 
         self.num_users = data["user"].num_nodes
         self.num_tires = data["tire"].num_nodes
@@ -171,35 +189,10 @@ class BPRSampler:
             val_ratio=val_ratio,
             test_ratio=test_ratio,
             seed=seed,
+            precomputed_split=precomputed_split,
         )
         self.train_data = self.split.train_data
 
-        # Close the item-feature aggregate leak: overwrite data['tire'].x with
-        # per-item aggregates recomputed from train edges only. Triggered when
-        # the caller passes the per-review DataFrame.
-        if review_df is not None:
-            from src.data_processing.preprocessing_movielens import (
-                recompute_tire_features_from_train,
-            )
-            full_edge_index = data["user", "reviews", "tire"].edge_index
-            edge_tire_idx = full_edge_index[1].cpu().numpy()
-            train_row_idx = self.split.train_idx.cpu().numpy()
-            new_x = recompute_tire_features_from_train(
-                review_df=review_df,
-                edge_tire_idx=edge_tire_idx,
-                train_row_idx=train_row_idx,
-                n_tires=self.num_tires,
-            )
-            new_x_t = torch.from_numpy(new_x).to(self.train_data["tire"].x.device)
-            if new_x_t.shape != self.train_data["tire"].x.shape:
-                raise ValueError(
-                    "Recomputed tire features shape "
-                    f"{tuple(new_x_t.shape)} does not match graph spec_dim "
-                    f"{tuple(self.train_data['tire'].x.shape)}."
-                )
-            self.train_data["tire"].x = new_x_t
-
-        ratings = edge_attr.squeeze(-1)
         idx_device = all_users.device
         train_idx = self.split.train_idx.to(idx_device)
         val_idx = self.split.val_idx.to(idx_device)
@@ -207,23 +200,33 @@ class BPRSampler:
 
         train_users_all = all_users.index_select(0, train_idx)
         train_tires_all = all_tires.index_select(0, train_idx)
-        train_ratings_all = ratings.index_select(0, train_idx)
         val_users_all = all_users.index_select(0, val_idx)
         val_tires_all = all_tires.index_select(0, val_idx)
-        val_ratings_all = ratings.index_select(0, val_idx)
         test_users_all = all_users.index_select(0, test_idx)
         test_tires_all = all_tires.index_select(0, test_idx)
-        test_ratings_all = ratings.index_select(0, test_idx)
 
-        train_good_mask = train_ratings_all >= rating_threshold
-        train_bad_mask = ~train_good_mask
-        val_good_mask = val_ratings_all >= rating_threshold
-        test_good_mask = test_ratings_all >= rating_threshold
+        if implicit:
+            users = train_users_all
+            tires = train_tires_all
+            bad_users = train_users_all.new_empty((0,))
+            bad_tires = train_tires_all.new_empty((0,))
+            val_good_mask = torch.ones(val_users_all.size(0), dtype=torch.bool, device=idx_device)
+            test_good_mask = torch.ones(test_users_all.size(0), dtype=torch.bool, device=idx_device)
+        else:
+            ratings = edge_attr.squeeze(-1)
+            train_ratings_all = ratings.index_select(0, train_idx)
+            val_ratings_all = ratings.index_select(0, val_idx)
+            test_ratings_all = ratings.index_select(0, test_idx)
 
-        users = train_users_all[train_good_mask]
-        tires = train_tires_all[train_good_mask]
-        bad_users = train_users_all[train_bad_mask]
-        bad_tires = train_tires_all[train_bad_mask]
+            train_good_mask = train_ratings_all >= rating_threshold
+            train_bad_mask = ~train_good_mask
+            val_good_mask = val_ratings_all >= rating_threshold
+            test_good_mask = test_ratings_all >= rating_threshold
+
+            users = train_users_all[train_good_mask]
+            tires = train_tires_all[train_good_mask]
+            bad_users = train_users_all[train_bad_mask]
+            bad_tires = train_tires_all[train_bad_mask]
 
         # Per-user reviewed items on the train split. BPR negatives must
         # avoid all of them, not just the train positives.

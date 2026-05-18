@@ -53,7 +53,7 @@ def pick_device(preferred: str | None) -> torch.device:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build FAISS index from a Two-Tower ckpt.")
     p.add_argument("--checkpoint", type=str, required=True)
-    p.add_argument("--graph", type=str, default="data/processed/hetero_graph_movielens.pt")
+    p.add_argument("--graph", type=str, default="data/processed/hetero_graph_yelp2018.pt")
     p.add_argument("--out-dir", type=str, default="outputs/index")
     p.add_argument("--device", type=str, default=None)
     return p.parse_args()
@@ -67,8 +67,7 @@ def main() -> None:
     graph_path = PROJECT_ROOT / args.graph
     payload = torch.load(graph_path, weights_only=False)
     data = payload["graph"].to(device)
-    mappings = payload["mappings"]
-    review_df = payload.get("review_df")
+    mappings = payload.get("mappings")
 
     ckpt_path = Path(args.checkpoint)
     if not ckpt_path.is_absolute():
@@ -79,9 +78,9 @@ def main() -> None:
 
     sampler = BPRSampler(
         data,
-        rating_threshold=train_args["rating_threshold"],
+        rating_threshold=None,
         seed=split_seed,
-        review_df=review_df,
+        precomputed_split=payload.get("precomputed_split"),
     )
     train_data = sampler.train_data
 
@@ -121,9 +120,16 @@ def main() -> None:
     np.save(out_dir / "item_vectors.npy", item_vec)
     np.save(out_dir / "user_vectors.npy", user_vec)
 
-    idx_to_tire = {v: k for k, v in mappings["tire_map"].items()}
+    # LightGCN ids are already integer-remapped so the Yelp 2018 payload
+    # carries no string→int mapping. Honor a `mappings` block if present
+    # (for payloads from explicit-feedback datasets with string item ids).
+    if mappings is not None and "tire_map" in mappings:
+        idx_to_tire = {v: k for k, v in mappings["tire_map"].items()}
+        id_map = {str(i): idx_to_tire[i] for i in range(n_tire)}
+    else:
+        id_map = {str(i): str(i) for i in range(n_tire)}
     with open(out_dir / "tire_id_map.json", "w") as f:
-        json.dump({str(i): idx_to_tire[i] for i in range(n_tire)}, f, indent=2)
+        json.dump(id_map, f, indent=2)
 
     print(f"Built FAISS index over {n_tire:,} tires (dim={dim}).")
     print(f"  → {out_dir / 'tire.faiss'}")
